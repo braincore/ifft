@@ -1,4 +1,9 @@
-# IF Filesystem-event Then (IFFT)
+# IF Filesystem-event Then (IFFT) [![Latest Version]][crates.io] [![Build Status]][travis]
+
+[Build Status]: https://api.travis-ci.com/braincore/ifft.svg?branch=master
+[travis]: https://travis-ci.com/braincore/ifft
+[Latest Version]: https://img.shields.io/crates/v/ifft.svg
+[crates.io]: https://crates.io/crates/ifft
 
 IF a filesystem event (create, write, remove, chmod) occurs in a watched folder
 that is not filtered out by an exclusion rule THEN execute a shell command.
