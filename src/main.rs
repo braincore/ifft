@@ -82,7 +82,7 @@ fn watch(config: Config) -> notify::Result<()> {
     }
 }
 
-fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifftt, PathBuf)>) {
+fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft, PathBuf)>) {
     let mut last_triggered = vec![None; num_iffts];
     loop {
         match rx.recv() {
@@ -144,11 +144,11 @@ fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft
 struct ConfigRaw {
     root: String,
     not: Option<Vec<String>>,
-    ifft: Vec<IffttRaw>,
+    ifft: Vec<IfftRaw>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IffttRaw {
+struct IfftRaw {
     name: Option<String>,
     // Always an absolute path.
     working_dir: Option<String>,
@@ -162,7 +162,7 @@ struct IffttRaw {
 struct Config {
     root: PathBuf,
     nots: Vec<Glob>,
-    iffts: Vec<Ifftt>,
+    iffts: Vec<Ifft>,
 }
 
 impl Config {
@@ -185,7 +185,7 @@ impl Config {
 }
 
 #[derive(Clone, Debug)]
-struct Ifftt {
+struct Ifft {
     id: u32,
     name: Option<String>,
     working_dir: Option<PathBuf>,
@@ -194,7 +194,7 @@ struct Ifftt {
     then: String,
 }
 
-impl Ifftt {
+impl Ifft {
     fn filter(&self, relpath: &Path) -> bool {
         assert!(relpath.is_relative());
         if let Some(ref if_cond) = self.if_cond {
@@ -229,7 +229,7 @@ impl Ifftt {
 }
 
 enum FilterResult<'a> {
-    Pass { ifft: &'a Ifftt },
+    Pass { ifft: &'a Ifft },
     Reject { global_not: Option<&'a Glob> },
 }
 
@@ -296,7 +296,7 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
                 working_dir = Some(test_path);
             }
         }
-        iffts.push(Ifftt {
+        iffts.push(Ifft {
             id: ifft_counter,
             name: ifft_raw.name.clone(),
             working_dir,
@@ -320,7 +320,7 @@ fn main() {
         .arg(
             Arg::with_name("CONFIG-PATH")
                 .required(true)
-                .help("The path to an IFFTT config file (.toml).")
+                .help("The path to an IFFT config file (.toml).")
                 .takes_value(true),
         )
         .get_matches();
@@ -352,7 +352,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        config_raw_to_config, Config, ConfigRaw, FilterResult, Glob, Ifftt, IffttRaw, Path, PathBuf,
+        config_raw_to_config, Config, ConfigRaw, FilterResult, Glob, Ifft, IfftRaw, Path, PathBuf,
     };
     use std::env;
 
@@ -395,7 +395,7 @@ mod tests {
         let config_raw = ConfigRaw {
             root: String::from("~"),
             not: None,
-            ifft: vec![IffttRaw {
+            ifft: vec![IfftRaw {
                 name: None,
                 working_dir: None,
                 if_cond: Some(String::from("***")),
@@ -413,7 +413,7 @@ mod tests {
         let config_raw = ConfigRaw {
             root: String::from("~"),
             not: None,
-            ifft: vec![IffttRaw {
+            ifft: vec![IfftRaw {
                 name: None,
                 working_dir: None,
                 if_cond: None,
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn ifft_if() {
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 0,
             name: None,
             working_dir: None,
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn ifft_not() {
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 0,
             name: None,
             working_dir: None,
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn ifft_then() {
         // Test default working directory
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 0,
             name: None,
             working_dir: None,
@@ -481,7 +481,7 @@ mod tests {
         );
 
         // Test specified working_dir
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 1,
             name: None,
             working_dir: Some(PathBuf::from("/home")),
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!("/home\n", stdout);
 
         // Test non-existent working dir
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 2,
             name: None,
             working_dir: Some(PathBuf::from("/does-not-exist")),
@@ -505,7 +505,7 @@ mod tests {
         ifft.then_exec(Path::new("/dummy")).is_err();
 
         // Test file path substitution
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 3,
             name: None,
             working_dir: None,
@@ -520,7 +520,7 @@ mod tests {
 
     #[test]
     fn config_not() {
-        let ifft = Ifftt {
+        let ifft = Ifft {
             id: 0,
             name: None,
             working_dir: None,
