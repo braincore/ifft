@@ -107,6 +107,7 @@ notifications. You'll need to use a separate filesystem event forwarder such as
 
 ## Alternatives
 
+* [bazel](https://bazel.build/) for a serious incremental build system.
 * [watchexec](https://github.com/watchexec/watchexec) is a more full-featured
   program.
 * [entr](http://eradman.com/entrproject/) has a clean Unixy interface.
