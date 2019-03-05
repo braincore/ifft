@@ -15,20 +15,29 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Output};
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
+use std::time::{Duration, Instant};
 extern crate toml;
 
 fn watch(config: Config) -> notify::Result<()> {
-    let (tx, rx) = channel();
-    let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_millis(250))?;
+    let (event_tx, event_rx) = channel();
+    let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
     // TODO: Compute the optimal path prefix for watching by finding the common prefix of all
     // if-cond paths. In other words, root is a convenient parent-path-invariance config but not
     // necessarily the optimal path to watch.
     watcher.watch(&config.root, RecursiveMode::Recursive)?;
 
+    let timer = Instant::now();
+    let (then_tx, then_rx) = channel();
+
+    let num_iffts = config.iffts.len();
+    thread::spawn(move || {
+        process_events(num_iffts, timer, then_rx);
+    });
+
     loop {
-        match rx.recv() {
+        match event_rx.recv() {
             Ok(event) => {
                 let date = Utc::now();
                 println!("[{}] Event: {:?}", date.format("%Y-%m-%d %H:%M:%SZ"), event);
@@ -51,33 +60,9 @@ fn watch(config: Config) -> notify::Result<()> {
                                     println!("  Matched if-cond: {:?}", if_cond.glob());
                                 }
 
-                                println!(
-                                    "  Executing: {:?} from {:?}",
-                                    ifft.then,
-                                    ifft.working_dir.as_ref().unwrap_or(&PathBuf::from("."))
-                                );
-
-                                let output_res = ifft.then_exec(&path);
-                                if let Err(e) = output_res {
-                                    eprintln!("  >Skipping due to error: {}", e);
-                                    continue;
-                                }
-                                let output = output_res.unwrap();
-                                if let Some(exit_code) = output.status.code() {
-                                    println!("  Exit code: {}", exit_code);
-                                }
-                                if let Ok(stdout) = String::from_utf8(output.stdout) {
-                                    println!("  Stdout:");
-                                    for line in stdout.lines() {
-                                        println!("    {}", line)
-                                    }
-                                }
-                                if let Ok(stderr) = String::from_utf8(output.stderr) {
-                                    println!("  Stderr:");
-                                    for line in stderr.lines() {
-                                        println!("    {}", line)
-                                    }
-                                }
+                                then_tx
+                                    .send((timer.elapsed(), ifft.clone(), path.clone()))
+                                    .unwrap();
                             }
                             FilterResult::Reject { global_not } => {
                                 if let Some(global_not) = global_not {
@@ -93,6 +78,64 @@ fn watch(config: Config) -> notify::Result<()> {
                 }
             }
             Err(e) => eprintln!("watch error: {:?}", e),
+        }
+    }
+}
+
+fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifftt, PathBuf)>) {
+    let mut last_triggered = vec![None; num_iffts];
+    loop {
+        match rx.recv() {
+            Ok((ts, ifft, path)) => {
+                let date = Utc::now();
+                println!(
+                    "[{}] Execute: {:?} from {:?}",
+                    date.format("%Y-%m-%d %H:%M:%SZ"),
+                    ifft.then,
+                    ifft.working_dir.as_ref().unwrap_or(&PathBuf::from("."))
+                );
+                if let Some(last_triggered) = last_triggered[ifft.id as usize] {
+                    if last_triggered > ts {
+                        println!(
+                            "  Skip: Already executed ifft after event: {:?} > {:?}",
+                            last_triggered, ts
+                        );
+                        continue;
+                    }
+                }
+                if !ifft.then_needs_path_sub() {
+                    // Sleep a small fraction of time in anticipation that more events
+                    // with the same trigger are coming in. Effectively another
+                    // debounce layer. Beware: This sets an upper bound on execution
+                    // throughput of 50 execs/sec.
+                    thread::sleep(Duration::from_millis(20));
+                    // Marking trigger time before we run the command is necessarily
+                    // conservative.
+                    last_triggered[ifft.id as usize] = Some(timer.elapsed());
+                }
+                let output_res = ifft.then_exec(&path);
+                if let Err(e) = output_res {
+                    eprintln!("  >Skipping due to error: {}", e);
+                    continue;
+                }
+                let output = output_res.unwrap();
+                if let Some(exit_code) = output.status.code() {
+                    println!("  Exit code: {}", exit_code);
+                }
+                if let Ok(stdout) = String::from_utf8(output.stdout) {
+                    println!("  Stdout:");
+                    for line in stdout.lines() {
+                        println!("    {}", line)
+                    }
+                }
+                if let Ok(stderr) = String::from_utf8(output.stderr) {
+                    println!("  Stderr:");
+                    for line in stderr.lines() {
+                        println!("    {}", line)
+                    }
+                }
+            }
+            Err(e) => eprintln!("process error: {:?}", e),
         }
     }
 }
@@ -141,8 +184,9 @@ impl Config {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Ifftt {
+    id: u32,
     name: Option<String>,
     working_dir: Option<PathBuf>,
     if_cond: Option<Glob>,
@@ -164,6 +208,11 @@ impl Ifftt {
             }
         }
         return true;
+    }
+
+    fn then_needs_path_sub(&self) -> bool {
+        // TODO: Cache this.
+        self.then.contains("{{}}")
     }
 
     fn then_exec(&self, path: &Path) -> io::Result<Output> {
@@ -217,6 +266,7 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
         }
     }
 
+    let mut ifft_counter = 0;
     let mut iffts = vec![];
     for ifft_raw in &config_raw.ifft {
         let mut nots = vec![];
@@ -247,12 +297,14 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
             }
         }
         iffts.push(Ifftt {
+            id: ifft_counter,
             name: ifft_raw.name.clone(),
             working_dir,
             if_cond,
             nots,
             then: ifft_raw.then.clone(),
-        })
+        });
+        ifft_counter += 1;
     }
 
     Ok(Config {
@@ -379,6 +431,7 @@ mod tests {
     #[test]
     fn ifft_if() {
         let ifft = Ifftt {
+            id: 0,
             name: None,
             working_dir: None,
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
@@ -394,6 +447,7 @@ mod tests {
     #[test]
     fn ifft_not() {
         let ifft = Ifftt {
+            id: 0,
             name: None,
             working_dir: None,
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
@@ -412,6 +466,7 @@ mod tests {
     fn ifft_then() {
         // Test default working directory
         let ifft = Ifftt {
+            id: 0,
             name: None,
             working_dir: None,
             if_cond: None,
@@ -427,6 +482,7 @@ mod tests {
 
         // Test specified working_dir
         let ifft = Ifftt {
+            id: 1,
             name: None,
             working_dir: Some(PathBuf::from("/home")),
             if_cond: None,
@@ -439,6 +495,7 @@ mod tests {
 
         // Test non-existent working dir
         let ifft = Ifftt {
+            id: 2,
             name: None,
             working_dir: Some(PathBuf::from("/does-not-exist")),
             if_cond: None,
@@ -449,6 +506,7 @@ mod tests {
 
         // Test file path substitution
         let ifft = Ifftt {
+            id: 3,
             name: None,
             working_dir: None,
             if_cond: None,
@@ -463,6 +521,7 @@ mod tests {
     #[test]
     fn config_not() {
         let ifft = Ifftt {
+            id: 0,
             name: None,
             working_dir: None,
             if_cond: Some(Glob::new("c/d/**").unwrap()),

@@ -89,6 +89,8 @@ the exit code, stdout, and stderr of the triggered command:
 * `root` as an absolute path independent from `if` conditions as relative paths.
 * `root` supports shell expansion: `~` and environment variables.
 * Global `not` filtering and per-trigger `not` filtering.
+* Multiple events that trigger the same `if` are buffered and only trigger one
+  `then` execution.
 
 ## Platforms
 
