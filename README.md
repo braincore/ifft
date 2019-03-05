@@ -13,12 +13,15 @@ compilation; or test run.
 
 ## Installation
 
-You'll need [rust installed](https://www.rust-lang.org/tools/install) on your
-machine.
+If you have [rust installed](https://www.rust-lang.org/tools/install) on your
+machine:
 
 ```
 cargo install ifft
 ```
+
+Otherwise, check [releases](https://github.com/braincore/ifft/releases) for
+downloads.
 
 ## Usage
 
