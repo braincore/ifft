@@ -92,7 +92,7 @@ fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft
                     "[{}] Execute: {:?} from {:?}",
                     date.format("%Y-%m-%d %H:%M:%SZ"),
                     ifft.then,
-                    ifft.working_dir.as_ref().unwrap_or(&PathBuf::from("."))
+                    ifft.working_dir,
                 );
                 if let Some(last_triggered) = last_triggered[ifft.id as usize] {
                     if last_triggered > ts {
@@ -188,7 +188,7 @@ impl Config {
 struct Ifft {
     id: u32,
     name: Option<String>,
-    working_dir: Option<PathBuf>,
+    working_dir: PathBuf,
     if_cond: Option<Glob>,
     nots: Vec<Glob>,
     then: String,
@@ -221,9 +221,7 @@ impl Ifft {
             .then
             .replace("{{}}", path.to_str().expect("Non utf-8 path"));
         cmd.arg("-c").arg(&then);
-        if let Some(ref working_dir) = self.working_dir {
-            cmd.current_dir(working_dir);
-        }
+        cmd.current_dir(&self.working_dir);
         cmd.output()
     }
 }
@@ -287,15 +285,16 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
             }
             if_cond = Some(try_glob.unwrap())
         }
-        let mut working_dir = None;
-        if let Some(ref working_dir_raw) = ifft_raw.working_dir {
+        let working_dir = if let Some(ref working_dir_raw) = ifft_raw.working_dir {
             let test_path = PathBuf::from(working_dir_raw);
             if test_path.is_relative() {
-                working_dir = Some(root.join(test_path));
+                root.join(test_path)
             } else {
-                working_dir = Some(test_path);
+                test_path
             }
-        }
+        } else {
+            root.clone()
+        };
         iffts.push(Ifft {
             id: ifft_counter,
             name: ifft_raw.name.clone(),
@@ -433,7 +432,7 @@ mod tests {
         let ifft = Ifft {
             id: 0,
             name: None,
-            working_dir: None,
+            working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
             nots: vec![],
             then: String::from("ls"),
@@ -449,7 +448,7 @@ mod tests {
         let ifft = Ifft {
             id: 0,
             name: None,
-            working_dir: None,
+            working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
             nots: vec![Glob::new("*.swp").unwrap(), Glob::new("*.pyc").unwrap()],
             then: String::from("ls"),
@@ -468,7 +467,7 @@ mod tests {
         let ifft = Ifft {
             id: 0,
             name: None,
-            working_dir: None,
+            working_dir: PathBuf::from("."),
             if_cond: None,
             nots: vec![],
             then: String::from("pwd"),
@@ -484,7 +483,7 @@ mod tests {
         let ifft = Ifft {
             id: 1,
             name: None,
-            working_dir: Some(PathBuf::from("/home")),
+            working_dir: PathBuf::from("/home"),
             if_cond: None,
             nots: vec![],
             then: String::from("pwd"),
@@ -497,7 +496,7 @@ mod tests {
         let ifft = Ifft {
             id: 2,
             name: None,
-            working_dir: Some(PathBuf::from("/does-not-exist")),
+            working_dir: PathBuf::from("/does-not-exist"),
             if_cond: None,
             nots: vec![],
             then: String::from("pwd"),
@@ -508,7 +507,7 @@ mod tests {
         let ifft = Ifft {
             id: 3,
             name: None,
-            working_dir: None,
+            working_dir: PathBuf::from("."),
             if_cond: None,
             nots: vec![],
             then: String::from("echo {{}}"),
@@ -523,7 +522,7 @@ mod tests {
         let ifft = Ifft {
             id: 0,
             name: None,
-            working_dir: None,
+            working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("c/d/**").unwrap()),
             nots: vec![],
             then: String::from("ls"),
