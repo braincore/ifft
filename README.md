@@ -29,7 +29,8 @@ Create a config file (`ifft_config.toml`):
 
 ```toml
 # The top-level folder to watch. Relative paths specified elsewhere will be
-# relative to this folder. Supports ~ and env vars ($VAR).
+# relative to this folder. Supports ~ and env vars ($VAR). If omitted, uses the
+# location of `ifft_config.toml`.
 root = "~/src"
 # Never trigger on a backup or swap file. (VIM specific)
 not = [
@@ -57,7 +58,8 @@ working_dir = "my-rust-prog"
 # if =
 # {{}} is substituted with the absolute path to the triggering file.
 then = "cp -R {{}} ."
-# working_dir can be an absolute path.
+# working_dir can be an absolute path. If omitted, the working_dir is set to
+# root.
 working_dir = "/tmp"
 ```
 

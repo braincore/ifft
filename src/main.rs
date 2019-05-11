@@ -142,7 +142,7 @@ fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft
 
 #[derive(Debug, Deserialize)]
 struct ConfigRaw {
-    root: String,
+    root: Option<String>,
     not: Option<Vec<String>>,
     ifft: Vec<IfftRaw>,
 }
@@ -235,8 +235,12 @@ enum FilterResult<'a> {
 // Because it results in a "loose" struct with optionals and primitive types,
 // we convert it to a Config which is stricter and makes use of more fitting
 // types.
-fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
-    let root_shell_expanded = shellexpand::full(&config_raw.root);
+fn config_raw_to_config(
+    config_raw: ConfigRaw,
+    config_parent_path: String,
+) -> Result<Config, String> {
+    let root_raw = config_raw.root.unwrap_or(config_parent_path);
+    let root_shell_expanded = shellexpand::full(&root_raw);
     if let Err(shellexpand::LookupError {
         ref var_name,
         ref cause,
@@ -245,7 +249,7 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
         return Err(match cause {
             &env::VarError::NotPresent => format!("Environment variable ${} not set.", var_name),
             &env::VarError::NotUnicode(_) => {
-                format!("Environment variable ${} is not validd unicode.", var_name)
+                format!("Environment variable ${} is not valid unicode.", var_name)
             }
         });
     }
@@ -253,6 +257,7 @@ fn config_raw_to_config(config_raw: ConfigRaw) -> Result<Config, String> {
     if !root.exists() {
         return Err(format!("Root path is invalid: {}", root.to_str().unwrap()));
     }
+    println!("The root is: {:?}", root);
     let mut root_nots = vec![];
     if let Some(ref root_not) = config_raw.not {
         for entry in root_not {
@@ -324,7 +329,7 @@ fn main() {
         )
         .get_matches();
     let config_path = value_t!(matches, "CONFIG-PATH", String).unwrap_or_else(|e| e.exit());
-    let contents = fs::read_to_string(config_path);
+    let contents = fs::read_to_string(&config_path);
     if let Err(e) = contents {
         eprintln!("error: Cannot read config: {}", e);
         exit(1);
@@ -334,7 +339,15 @@ fn main() {
         eprintln!("error: Cannot parse config: {}", e);
         exit(1);
     }
-    let config = config_raw_to_config(config_raw.unwrap());
+    // Safe unwrap since we've successfully opened the config path already.
+    // Assume we can safely round trip path: string -> Path -> string.
+    let config_parent_path = PathBuf::from(&config_path)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let config = config_raw_to_config(config_raw.unwrap(), config_parent_path);
     match config {
         Ok(config) => {
             if let Err(e) = watch(config) {
@@ -359,20 +372,20 @@ mod tests {
     fn config_converter() {
         // Test non-existent root
         let config_raw = ConfigRaw {
-            root: String::from("/does-not-exist"),
+            root: Some(String::from("/does-not-exist")),
             not: None,
             ifft: vec![],
         };
-        let res = config_raw_to_config(config_raw);
+        let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(res.unwrap_err(), "Root path is invalid: /does-not-exist");
 
         // Test missing env var
         let config_raw = ConfigRaw {
-            root: String::from("/$DOESNOTEXIST/does-not-exist"),
+            root: Some(String::from("/$DOESNOTEXIST/does-not-exist")),
             not: None,
             ifft: vec![],
         };
-        let res = config_raw_to_config(config_raw);
+        let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
             res.unwrap_err(),
             "Environment variable $DOESNOTEXIST not set."
@@ -380,11 +393,11 @@ mod tests {
 
         // Test bad root.not glob
         let config_raw = ConfigRaw {
-            root: String::from("~"),
+            root: Some(String::from("~")),
             not: Some(vec![String::from("***")]),
             ifft: vec![],
         };
-        let res = config_raw_to_config(config_raw);
+        let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
             res.unwrap_err(),
             "root.not: error parsing glob '***': invalid use of **; must be one path component"
@@ -392,7 +405,7 @@ mod tests {
 
         // Test bad ifft.if glob
         let config_raw = ConfigRaw {
-            root: String::from("~"),
+            root: Some(String::from("~")),
             not: None,
             ifft: vec![IfftRaw {
                 name: None,
@@ -402,7 +415,7 @@ mod tests {
                 then: String::from("ls"),
             }],
         };
-        let res = config_raw_to_config(config_raw);
+        let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
             res.unwrap_err(),
             "ifft.if: error parsing glob '***': invalid use of **; must be one path component"
@@ -410,7 +423,7 @@ mod tests {
 
         // Test bad ifft.not glob
         let config_raw = ConfigRaw {
-            root: String::from("~"),
+            root: Some(String::from("~")),
             not: None,
             ifft: vec![IfftRaw {
                 name: None,
@@ -420,11 +433,26 @@ mod tests {
                 then: String::from("ls"),
             }],
         };
-        let res = config_raw_to_config(config_raw);
+        let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
             res.unwrap_err(),
             "ifft.not: error parsing glob '***': invalid use of **; must be one path component"
         );
+
+        // Test root uses config_path if omitted.
+        let config_raw = ConfigRaw {
+            root: None,
+            not: None,
+            ifft: vec![IfftRaw {
+                name: None,
+                working_dir: None,
+                if_cond: None,
+                not: None,
+                then: String::from("ls"),
+            }],
+        };
+        let res = config_raw_to_config(config_raw, "/home".to_string());
+        assert_eq!(res.unwrap().root, PathBuf::from("/home"),);
     }
 
     #[test]
