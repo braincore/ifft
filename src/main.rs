@@ -19,19 +19,24 @@ use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 extern crate toml;
+extern crate walkdir;
+use walkdir::{DirEntry, WalkDir};
 
-fn watch(config: Config) -> notify::Result<()> {
+fn watch(watch_path: String, configs: Vec<Config>) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
     let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
     // TODO: Compute the optimal path prefix for watching by finding the common prefix of all
     // if-cond paths. In other words, root is a convenient parent-path-invariance config but not
     // necessarily the optimal path to watch.
-    watcher.watch(&config.root, RecursiveMode::Recursive)?;
+    watcher.watch(&watch_path, RecursiveMode::Recursive)?;
 
     let timer = Instant::now();
     let (then_tx, then_rx) = channel();
 
-    let num_iffts = config.iffts.len();
+    let mut num_iffts = 0;
+    for config in &configs {
+        num_iffts += config.iffts.len();
+    }
     thread::spawn(move || {
         process_events(num_iffts, timer, then_rx);
     });
@@ -49,26 +54,42 @@ fn watch(config: Config) -> notify::Result<()> {
                     | DebouncedEvent::Write(path)
                     | DebouncedEvent::Chmod(path) => {
                         assert!(path.is_absolute());
-                        let relpath = path.strip_prefix(&config.root).unwrap();
-                        assert!(relpath.is_relative());
-                        match config.filter(relpath) {
-                            FilterResult::Pass { ifft } => {
-                                if let Some(ref name) = ifft.name {
-                                    println!("  Matched ifft: {}", name);
+                        let mut ifft_offset = 0;
+                        for config in &configs {
+                            let cur_ifft_offset = ifft_offset.clone();
+                            ifft_offset += config.iffts.len();
+                            let relpath = match path.strip_prefix(&config.root) {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    continue;
                                 }
-                                if let Some(ref if_cond) = ifft.if_cond {
-                                    println!("  Matched if-cond: {:?}", if_cond.glob());
-                                }
+                            };
+                            assert!(relpath.is_relative());
+                            match config.filter(relpath) {
+                                FilterResult::Pass { ifft } => {
+                                    println!("  Match from config in: {:?}", config.root);
+                                    if let Some(ref name) = ifft.name {
+                                        println!("  Matched ifft: {}", name);
+                                    }
+                                    if let Some(ref if_cond) = ifft.if_cond {
+                                        println!("  Matched if-cond: {:?}", if_cond.glob());
+                                    }
 
-                                then_tx
-                                    .send((timer.elapsed(), ifft.clone(), path.clone()))
-                                    .unwrap();
-                            }
-                            FilterResult::Reject { global_not } => {
-                                if let Some(global_not) = global_not {
-                                    println!("  Skip: global not: {:?}", global_not.glob());
+                                    then_tx
+                                        .send((
+                                            timer.elapsed(),
+                                            cur_ifft_offset,
+                                            ifft.clone(),
+                                            path.clone(),
+                                        ))
+                                        .unwrap();
                                 }
-                                continue;
+                                FilterResult::Reject { global_not } => {
+                                    if let Some(global_not) = global_not {
+                                        println!("  Skip: global not: {:?}", global_not.glob());
+                                    }
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -82,11 +103,15 @@ fn watch(config: Config) -> notify::Result<()> {
     }
 }
 
-fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft, PathBuf)>) {
+fn process_events(
+    num_iffts: usize,
+    timer: Instant,
+    rx: Receiver<(Duration, usize, Ifft, PathBuf)>,
+) {
     let mut last_triggered = vec![None; num_iffts];
     loop {
         match rx.recv() {
-            Ok((ts, ifft, path)) => {
+            Ok((ts, cur_ifft_offset, ifft, path)) => {
                 let date = Utc::now();
                 println!(
                     "[{}] Execute: {:?} from {:?}",
@@ -94,7 +119,8 @@ fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft
                     ifft.then,
                     ifft.working_dir,
                 );
-                if let Some(last_triggered) = last_triggered[ifft.id as usize] {
+                let last_triggered_index = cur_ifft_offset + ifft.id as usize;
+                if let Some(last_triggered) = last_triggered[last_triggered_index] {
                     if last_triggered > ts {
                         println!(
                             "  Skip: Already executed ifft after event: {:?} > {:?}",
@@ -111,7 +137,7 @@ fn process_events(num_iffts: usize, timer: Instant, rx: Receiver<(Duration, Ifft
                     thread::sleep(Duration::from_millis(20));
                     // Marking trigger time before we run the command is necessarily
                     // conservative.
-                    last_triggered[ifft.id as usize] = Some(timer.elapsed());
+                    last_triggered[last_triggered_index] = Some(timer.elapsed());
                 }
                 let output_res = ifft.then_exec(&path);
                 if let Err(e) = output_res {
@@ -254,10 +280,12 @@ fn config_raw_to_config(
         });
     }
     let root = PathBuf::from(&*root_shell_expanded.unwrap());
+    if root.is_relative() {
+        return Err(format!("Root path is relative: {}", root.to_str().unwrap()));
+    }
     if !root.exists() {
         return Err(format!("Root path is invalid: {}", root.to_str().unwrap()));
     }
-    println!("The root is: {:?}", root);
     let mut root_nots = vec![];
     if let Some(ref root_not) = config_raw.not {
         for entry in root_not {
@@ -318,27 +346,21 @@ fn config_raw_to_config(
     })
 }
 
-fn main() {
-    let matches = App::new("IFFT")
-        .about("IF Filesystem-event Then")
-        .arg(
-            Arg::with_name("CONFIG-PATH")
-                .required(true)
-                .help("The path to an IFFT config file (.toml).")
-                .takes_value(true),
-        )
-        .get_matches();
-    let config_path = value_t!(matches, "CONFIG-PATH", String).unwrap_or_else(|e| e.exit());
-    let contents = fs::read_to_string(&config_path);
-    if let Err(e) = contents {
-        eprintln!("error: Cannot read config: {}", e);
-        exit(1);
-    }
-    let config_raw = toml::from_str(&contents.unwrap());
-    if let Err(e) = config_raw {
-        eprintln!("error: Cannot parse config: {}", e);
-        exit(1);
-    }
+fn read_and_parse_config(config_path: String) -> Config {
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("error: Cannot read config: {}", e);
+            exit(1);
+        }
+    };
+    let config_raw = match toml::from_str(&contents) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("error: Cannot parse config: {}", e);
+            exit(1);
+        }
+    };
     // Safe unwrap since we've successfully opened the config path already.
     // Assume we can safely round trip path: string -> Path -> string.
     let config_parent_path = PathBuf::from(&config_path)
@@ -347,17 +369,53 @@ fn main() {
         .to_str()
         .unwrap()
         .to_string();
-    let config = config_raw_to_config(config_raw.unwrap(), config_parent_path);
+    let config = config_raw_to_config(config_raw, config_parent_path.clone());
     match config {
-        Ok(config) => {
-            if let Err(e) = watch(config) {
-                eprintln!("error: {:?}", e)
-            }
-        }
+        Ok(config) => config,
         Err(e) => {
             eprintln!("error: {}", e);
             exit(1);
         }
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_str().unwrap().to_string()
+}
+
+fn main() {
+    let matches = App::new("IFFT")
+        .about("IF Filesystem-event Then")
+        .arg(
+            Arg::with_name("WATCH-PATH")
+                .required(true)
+                .help("The path to an IFFT config file (.toml).")
+                .takes_value(true),
+        )
+        .get_matches();
+    let mut configs = vec![];
+    let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
+    fn is_hidden(entry: &DirEntry) -> bool {
+        entry
+            .file_name()
+            .to_str()
+            .map(|s| s.starts_with("."))
+            .unwrap_or(false)
+    }
+
+    let walker = WalkDir::new(&watch_path).into_iter();
+    for entry in walker.filter_entry(|e| !is_hidden(e)) {
+        let entry = entry.unwrap();
+        let path = entry.into_path();
+        if !(path.is_file() && path.file_name().unwrap() == "ifft.toml") {
+            continue;
+        }
+        println!("Found config: {:?}", path);
+        let config = read_and_parse_config(path_to_string(&path));
+        configs.push(config);
+    }
+    if let Err(e) = watch(watch_path, configs) {
+        eprintln!("error: {:?}", e);
     }
 }
 
@@ -370,6 +428,15 @@ mod tests {
 
     #[test]
     fn config_converter() {
+        // Test relative root
+        let config_raw = ConfigRaw {
+            root: Some(String::from("relative/path")),
+            not: None,
+            ifft: vec![],
+        };
+        let res = config_raw_to_config(config_raw, "/home".to_string());
+        assert_eq!(res.unwrap_err(), "Root path is relative: relative/path");
+
         // Test non-existent root
         let config_raw = ConfigRaw {
             root: Some(String::from("/does-not-exist")),

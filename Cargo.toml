@@ -17,6 +17,7 @@ serde = "1.0"
 serde_derive = "1.0"
 shellexpand = "1.0"
 toml = "0.4"
+walkdir = "2"
 
 [badges]
 travis-ci = { repository = "braincore/ifft" }

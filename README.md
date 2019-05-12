@@ -25,13 +25,55 @@ downloads.
 
 ## Usage
 
-Create a config file (`ifft_config.toml`):
+### Hello, world.
+
+Create a config file (`ifft.toml`) in a directory (let's say `~/ifft-test`):
 
 ```toml
-# The top-level folder to watch. Relative paths specified elsewhere will be
-# relative to this folder. Supports ~ and env vars ($VAR). If omitted, uses the
-# location of `ifft_config.toml`.
-root = "~/src"
+[[ifft]]
+# Matches everything including sub-folders
+if = "**/*"
+then = "echo hello, world."
+```
+
+Run `ifft` with the directory containing your config as the argument:
+`ifft ~/ifft-test`.
+
+You'll see the following output, which indicates that `ifft` found your config
+file:
+
+```
+Found config: "~/ifft-test/ifft.toml"
+```
+
+In later examples, we'll see that multiple config files can be embedded
+throughout the directory tree.
+
+Now let's create a file that will trigger `ifft`: `touch ~/src/test1`
+You'll see the following output:
+
+```
+[2019-05-12 14:55:57Z] Event: Create("~/ifft-test/test1")
+  Match from config in: "~/ifft-test"
+  Matched if-cond: "**/*"
+[2019-05-12 14:55:57Z] Execute: "echo hello, world." from "~/ifft-test"
+  Exit code: 0
+  Stdout:
+    hello, world.
+  Stderr:
+```
+
+As you can see, triggers report the match condition and the exit code, stdout,
+and stderr of the triggered command.
+
+That's it. `ifft` simply listens for file changes and takes action.
+
+### Advanced
+
+Here's a more complex `ifft` config that would be in a folder such as `~/src`
+with sub-folders `my-c-prog` and `my-rust-prog`:
+
+```toml
 # Never trigger on a backup or swap file. (VIM specific)
 not = [
     "*~",
@@ -39,14 +81,13 @@ not = [
 ]
 
 [[ifft]]
-# my-c-prog is a folder in ~/src
 # If any .c or .h files change, recompile.
 if = "my-c-prog/**/*.{c,h}"
 then = "make"
 working_dir = "my-c-prog"
 
 [[ifft]]
-if = "my-rust-prog/*"
+if = "my-rust-prog/**/*.{rs,toml}"
 # Ignore changes in the target folder to avoid recursive triggering.
 not = ["my-rust-prog/target/*"]
 then = "cargo build"
@@ -54,7 +95,7 @@ working_dir = "my-rust-prog"
 
 # Contrived example to demonstrate other features.
 [[ifft]]
-# Omitting the if condition -> trigger on all events under root.
+# Omitting the if condition -> trigger on all events.
 # if =
 # {{}} is substituted with the absolute path to the triggering file.
 then = "cp -R {{}} ."
@@ -63,36 +104,23 @@ then = "cp -R {{}} ."
 working_dir = "/tmp"
 ```
 
-Run `ifft`:
-
-```bash
-ifft path/to/ifft_config.toml
-```
-
-Output:
-
-`ifft` is verbose for easy debugging. Triggers report the match condition and
-the exit code, stdout, and stderr of the triggered command:
+The second `ifft` condition could be moved into a new `ifft.toml` in the
+`my-rust-prog` folder. For equivalent functionality, the contents would be:
 
 ```
-[2019-01-31 04:51:28Z] Event: Create("/home/ken/src/my-rust-prog/src/main.rs")
-  Matched if-cond: "my-rust-prog/*"
-  Executing: "cargo build" from "/home/ken/src/my-rust-prog"
-  Exit code: 0
-  Stdout:
-  Stderr:
-       Compiling my-rust-prog v0.1.0 (/home/ken/src/my-rust-prog)
-        Finished dev [unoptimized + debuginfo] target(s) in 0.27s
-[2019-01-31 04:51:28Z] Event: Create("/home/ken/src/my-rust-prog/target/debug/incremental/my_rust_prog-1m194buzrsqka/s-f91jk9lg3a-wlnrr5.lock")
-[2019-01-31 04:51:28Z] Event: Write("/home/ken/src/my-rust-prog/target/debug/deps/my_rust_prog-b5f4d74ed1175a94.d")
+[[ifft]]
+if = "**/*.{rs,toml}"
+not = ["target/*"]
+then = "cargo build"
 ```
+
+This allows you to distribute config files all over, which has the advantage
+of keeping them small and relevant to the folder they're in.
 
 ## Features
 
 * Configure with a `toml` file.
 * Use glob patterns for `if` and `not` conditions.
-* `root` as an absolute path independent from `if` conditions as relative paths.
-* `root` supports shell expansion: `~` and environment variables.
 * Global `not` filtering and per-trigger `not` filtering.
 * Multiple events that trigger the same `if` are buffered and only trigger one
   `then` execution.
