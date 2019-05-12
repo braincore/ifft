@@ -95,8 +95,7 @@ working_dir = "my-rust-prog"
 
 # Contrived example to demonstrate other features.
 [[ifft]]
-# Omitting the if condition -> trigger on all events.
-# if =
+if = "*"
 # {{}} is substituted with the absolute path to the triggering file.
 then = "cp -R {{}} ."
 # working_dir can be an absolute path. If omitted, the working_dir is set to

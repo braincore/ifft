@@ -253,6 +253,9 @@ impl Ifft {
             if !if_cond.compile_matcher().is_match(&relpath) {
                 return false;
             }
+        } else {
+            // If no if_cond, never match.
+            return false;
         }
         for not in &self.nots {
             if not.compile_matcher().is_match(&relpath) {
@@ -574,6 +577,17 @@ mod tests {
         // Test pass case
         assert!(ifft.filter(&PathBuf::from("a/b/c/d")));
         // Test reject case
+        assert!(!ifft.filter(&PathBuf::from("a/b")));
+
+        // Test that a lack of if_cond rejects the path
+        let ifft = Ifft {
+            id: 0,
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: None,
+            nots: vec![],
+            then: String::from("ls"),
+        };
         assert!(!ifft.filter(&PathBuf::from("a/b")));
     }
 
