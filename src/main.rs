@@ -29,8 +29,8 @@ fn watch(
     quit_after_run_before: bool,
 ) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
+    let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
     if !quit_after_run_before {
-        let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
         watcher.watch(&watch_path, RecursiveMode::Recursive)?;
     }
 
