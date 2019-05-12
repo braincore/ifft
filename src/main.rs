@@ -22,7 +22,11 @@ extern crate toml;
 extern crate walkdir;
 use walkdir::{DirEntry, WalkDir};
 
-fn watch(watch_path: String, configs: Vec<Config>) -> notify::Result<()> {
+fn watch(
+    watch_path: String,
+    configs: Vec<Config>,
+    run_before_name: Option<String>,
+) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
     let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
     // TODO: Compute the optimal path prefix for watching by finding the common prefix of all
@@ -40,6 +44,28 @@ fn watch(watch_path: String, configs: Vec<Config>) -> notify::Result<()> {
     thread::spawn(move || {
         process_events(num_iffts, timer, then_rx);
     });
+
+    if run_before_name.is_some() {
+        let mut ifft_offset = 0;
+        for config in &configs {
+            for ifft in &config.iffts {
+                if ifft.name == run_before_name {
+                    if ifft.then_needs_path_sub() {
+                        println!(
+                            "Run-Before: Ignoring ifft b/c it needs a path sub: {:?}",
+                            config.root
+                        );
+                    } else {
+                        println!("Run-Before: Match ifft name in config: {:?}", config.root);
+                        then_tx
+                            .send((timer.elapsed(), ifft_offset, ifft.clone(), None))
+                            .unwrap();
+                    }
+                }
+                ifft_offset += config.iffts.len();
+            }
+        }
+    }
 
     loop {
         match event_rx.recv() {
@@ -80,7 +106,7 @@ fn watch(watch_path: String, configs: Vec<Config>) -> notify::Result<()> {
                                             timer.elapsed(),
                                             cur_ifft_offset,
                                             ifft.clone(),
-                                            path.clone(),
+                                            Some(path.clone()),
                                         ))
                                         .unwrap();
                                 }
@@ -106,7 +132,7 @@ fn watch(watch_path: String, configs: Vec<Config>) -> notify::Result<()> {
 fn process_events(
     num_iffts: usize,
     timer: Instant,
-    rx: Receiver<(Duration, usize, Ifft, PathBuf)>,
+    rx: Receiver<(Duration, usize, Ifft, Option<PathBuf>)>,
 ) {
     let mut last_triggered = vec![None; num_iffts];
     loop {
@@ -241,11 +267,15 @@ impl Ifft {
         self.then.contains("{{}}")
     }
 
-    fn then_exec(&self, path: &Path) -> io::Result<Output> {
+    fn then_exec(&self, path: &Option<PathBuf>) -> io::Result<Output> {
         let mut cmd = Command::new("sh");
-        let then = self
-            .then
-            .replace("{{}}", path.to_str().expect("Non utf-8 path"));
+        let then = if let Some(path) = path {
+            self.then
+                .replace("{{}}", path.to_str().expect("Non utf-8 path"))
+        } else {
+            assert!(!self.then_needs_path_sub());
+            self.then.clone()
+        };
         cmd.arg("-c").arg(&then);
         cmd.current_dir(&self.working_dir);
         cmd.output()
@@ -392,9 +422,18 @@ fn main() {
                 .help("The path to an IFFT config file (.toml).")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("RUN-BEFORE")
+                .required(false)
+                .short("r")
+                .long("run")
+                .help("Run all iffts with specified name before watching.")
+                .takes_value(true),
+        )
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
+    let run_before_name = value_t!(matches, "RUN-BEFORE", String);
     fn is_hidden(entry: &DirEntry) -> bool {
         entry
             .file_name()
@@ -414,7 +453,7 @@ fn main() {
         let config = read_and_parse_config(path_to_string(&path));
         configs.push(config);
     }
-    if let Err(e) = watch(watch_path, configs) {
+    if let Err(e) = watch(watch_path, configs, run_before_name.ok()) {
         eprintln!("error: {:?}", e);
     }
 }
@@ -567,7 +606,9 @@ mod tests {
             nots: vec![],
             then: String::from("pwd"),
         };
-        let output = ifft.then_exec(Path::new("/dummy")).unwrap();
+        let output = ifft
+            .then_exec(&Some(Path::new("/dummy").to_path_buf()))
+            .unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!(
             env::current_dir().unwrap().to_str().unwrap(),
@@ -583,7 +624,9 @@ mod tests {
             nots: vec![],
             then: String::from("pwd"),
         };
-        let output = ifft.then_exec(Path::new("/dummy")).unwrap();
+        let output = ifft
+            .then_exec(&Some(Path::new("/dummy").to_path_buf()))
+            .unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!("/home\n", stdout);
 
@@ -596,7 +639,8 @@ mod tests {
             nots: vec![],
             then: String::from("pwd"),
         };
-        ifft.then_exec(Path::new("/dummy")).is_err();
+        ifft.then_exec(&Some(Path::new("/dummy").to_path_buf()))
+            .is_err();
 
         // Test file path substitution
         let ifft = Ifft {
@@ -607,9 +651,23 @@ mod tests {
             nots: vec![],
             then: String::from("echo {{}}"),
         };
-        let output = ifft.then_exec(Path::new("/a/b/c")).unwrap();
+        let output = ifft
+            .then_exec(&Some(Path::new("/a/b/c").to_path_buf()))
+            .unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert_eq!("/a/b/c\n", stdout);
+
+        // Test file path substitution without path
+        let ifft = Ifft {
+            id: 3,
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: None,
+            nots: vec![],
+            then: String::from("echo {{}}"),
+        };
+        let result = std::panic::catch_unwind(|| ifft.then_exec(&None).unwrap());
+        assert!(result.is_err());
     }
 
     #[test]

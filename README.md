@@ -117,13 +117,32 @@ then = "cargo build"
 This allows you to distribute config files all over, which has the advantage
 of keeping them small and relevant to the folder they're in.
 
+### On start
+
+If you want to automatically trigger iffts on start without any file event,
+use the `-r` flag. The argument will trigger any iffts with matching names. For
+example, running `ifft ~/ifft-test -r build` will match:
+
+```toml
+[[ifft]]
+name = "build"
+if = "**/*.{rs,toml}"
+not = ["target/*"]
+then = "cargo build"
+```
+
+This is useful to ensure that projects are built on boot without having to wait
+for a file event.
+
 ## Features
 
 * Configure with a `toml` file.
+* Config files can be distributed throughout a directory tree.
 * Use glob patterns for `if` and `not` conditions.
 * Global `not` filtering and per-trigger `not` filtering.
 * Multiple events that trigger the same `if` are buffered and only trigger one
   `then` execution.
+* On start, iffts with a matching name can be triggered without any file event.
 
 ## Platforms
 
