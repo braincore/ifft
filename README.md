@@ -133,6 +133,10 @@ then = "cargo build"
 This is useful to ensure that projects are built on boot without having to wait
 for a file event.
 
+You can also use the `-q` flag to quit after the `-r` flag triggers have
+completed. This can be used to initiate a one-time build or clean without
+listening for changes afterwards.
+
 ## Features
 
 * Configure with a `toml` file.

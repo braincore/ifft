@@ -26,13 +26,13 @@ fn watch(
     watch_path: String,
     configs: Vec<Config>,
     run_before_name: Option<String>,
+    quit_after_run_before: bool,
 ) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
-    let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
-    // TODO: Compute the optimal path prefix for watching by finding the common prefix of all
-    // if-cond paths. In other words, root is a convenient parent-path-invariance config but not
-    // necessarily the optimal path to watch.
-    watcher.watch(&watch_path, RecursiveMode::Recursive)?;
+    if !quit_after_run_before {
+        let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
+        watcher.watch(&watch_path, RecursiveMode::Recursive)?;
+    }
 
     let timer = Instant::now();
     let (then_tx, then_rx) = channel();
@@ -58,13 +58,16 @@ fn watch(
                     } else {
                         println!("Run-Before: Match ifft name in config: {:?}", config.root);
                         then_tx
-                            .send((timer.elapsed(), ifft_offset, ifft.clone(), None))
+                            .send(Some((timer.elapsed(), ifft_offset, ifft.clone(), None)))
                             .unwrap();
                     }
                 }
-                ifft_offset += config.iffts.len();
             }
+            ifft_offset += config.iffts.len();
         }
+    }
+    if quit_after_run_before {
+        then_tx.send(None).unwrap();
     }
 
     loop {
@@ -102,12 +105,12 @@ fn watch(
                                     }
 
                                     then_tx
-                                        .send((
+                                        .send(Some((
                                             timer.elapsed(),
                                             cur_ifft_offset,
                                             ifft.clone(),
                                             Some(path.clone()),
-                                        ))
+                                        )))
                                         .unwrap();
                                 }
                                 FilterResult::Reject { global_not } => {
@@ -132,12 +135,17 @@ fn watch(
 fn process_events(
     num_iffts: usize,
     timer: Instant,
-    rx: Receiver<(Duration, usize, Ifft, Option<PathBuf>)>,
+    rx: Receiver<Option<(Duration, usize, Ifft, Option<PathBuf>)>>,
 ) {
     let mut last_triggered = vec![None; num_iffts];
     loop {
         match rx.recv() {
-            Ok((ts, cur_ifft_offset, ifft, path)) => {
+            Ok(msg) => {
+                if msg.is_none() {
+                    println!("Exiting...");
+                    exit(0);
+                }
+                let (ts, cur_ifft_offset, ifft, path) = msg.unwrap();
                 let date = Utc::now();
                 println!(
                     "[{}] Execute: {:?} from {:?}",
@@ -433,10 +441,18 @@ fn main() {
                 .help("Run all iffts with specified name before watching.")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("QUIT-AFTER-RUN-BEFORE")
+                .required(false)
+                .short("q")
+                .long("quit")
+                .help("Quit after iffts matching run-before have been executed.."),
+        )
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
     let run_before_name = value_t!(matches, "RUN-BEFORE", String);
+    let quit_after_run_before = matches.is_present("QUIT-AFTER-RUN-BEFORE");
     fn is_hidden(entry: &DirEntry) -> bool {
         entry
             .file_name()
@@ -456,7 +472,12 @@ fn main() {
         let config = read_and_parse_config(path_to_string(&path));
         configs.push(config);
     }
-    if let Err(e) = watch(watch_path, configs, run_before_name.ok()) {
+    if let Err(e) = watch(
+        watch_path,
+        configs,
+        run_before_name.ok(),
+        quit_after_run_before,
+    ) {
         eprintln!("error: {:?}", e);
     }
 }
