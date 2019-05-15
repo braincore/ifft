@@ -49,7 +49,7 @@ Found config: "~/ifft-test/ifft.toml"
 In later examples, we'll see that multiple config files can be embedded
 throughout the directory tree.
 
-Now let's create a file that will trigger `ifft`: `touch ~/src/test1`
+Now let's create a file that will trigger `ifft`: `touch ~/ifft-test/test1`
 You'll see the following output:
 
 ```
@@ -136,6 +136,9 @@ for a file event.
 You can also use the `-q` flag to quit after the `-r` flag triggers have
 completed. This can be used to initiate a one-time build or clean without
 listening for changes afterwards.
+
+Another strategy is to omit the `if` condition which means it can only be
+triggered on start with the `-r` flag.
 
 ## Features
 
