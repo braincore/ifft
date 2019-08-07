@@ -31,7 +31,8 @@ fn watch(
     let (event_tx, event_rx) = channel();
     let mut watcher: RecommendedWatcher = Watcher::new(event_tx, Duration::from_millis(250))?;
     if !quit_after_run_before {
-        watcher.watch(&watch_path, RecursiveMode::Recursive)?;
+        let canonical_watch_path = PathBuf::from(watch_path).canonicalize().unwrap();
+        watcher.watch(&canonical_watch_path, RecursiveMode::Recursive)?;
     }
 
     let timer = Instant::now();
@@ -320,13 +321,15 @@ fn config_raw_to_config(
             }
         });
     }
-    let root = PathBuf::from(&*root_shell_expanded.unwrap());
-    if root.is_relative() {
-        return Err(format!("Root path is relative: {}", root.to_str().unwrap()));
+    let test_root = PathBuf::from(&*root_shell_expanded.unwrap());
+    if !test_root.exists() {
+        return Err(format!(
+            "Root path is invalid: {}",
+            test_root.to_str().unwrap()
+        ));
     }
-    if !root.exists() {
-        return Err(format!("Root path is invalid: {}", root.to_str().unwrap()));
-    }
+    let root = test_root.canonicalize().unwrap();
+
     let mut root_nots = vec![];
     if let Some(ref root_not) = config_raw.not {
         for entry in root_not {
@@ -463,6 +466,10 @@ fn main() {
 
     let walker = WalkDir::new(&watch_path).into_iter();
     for entry in walker.filter_entry(|e| !is_hidden(e)) {
+        if let Err(e) = entry {
+            println!("error: {}", e);
+            continue;
+        }
         let entry = entry.unwrap();
         let path = entry.into_path();
         if !(path.is_file() && path.file_name().unwrap() == "ifft.toml") {
@@ -491,15 +498,6 @@ mod tests {
 
     #[test]
     fn config_converter() {
-        // Test relative root
-        let config_raw = ConfigRaw {
-            root: Some(String::from("relative/path")),
-            not: None,
-            ifft: vec![],
-        };
-        let res = config_raw_to_config(config_raw, "/home".to_string());
-        assert_eq!(res.unwrap_err(), "Root path is relative: relative/path");
-
         // Test non-existent root
         let config_raw = ConfigRaw {
             root: Some(String::from("/does-not-exist")),
@@ -508,6 +506,15 @@ mod tests {
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(res.unwrap_err(), "Root path is invalid: /does-not-exist");
+
+        // Test relative root (still does not exist)
+        let config_raw = ConfigRaw {
+            root: Some(String::from("does-not-exist")),
+            not: None,
+            ifft: vec![],
+        };
+        let res = config_raw_to_config(config_raw, "/home".to_string());
+        assert_eq!(res.unwrap_err(), "Root path is invalid: does-not-exist");
 
         // Test missing env var
         let config_raw = ConfigRaw {
