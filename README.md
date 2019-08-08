@@ -149,6 +149,8 @@ triggered on start with the `-r` flag.
 * Multiple events that trigger the same `if` are buffered and only trigger one
   `then` execution.
 * On start, iffts with a matching name can be triggered without any file event.
+* Events on paths with symlink components will also have their absolute-path
+  equivalent tested against triggers.
 
 ## Platforms
 

@@ -84,41 +84,71 @@ fn watch(
                     | DebouncedEvent::Write(path)
                     | DebouncedEvent::Chmod(path) => {
                         assert!(path.is_absolute());
-                        let mut ifft_offset = 0;
-                        for config in &configs {
-                            let cur_ifft_offset = ifft_offset.clone();
-                            ifft_offset += config.iffts.len();
-                            let relpath = match path.strip_prefix(&config.root) {
-                                Ok(p) => p,
-                                Err(_) => {
-                                    continue;
+                        let mut paths = vec![path.clone()];
+                        let canonical_path = match path.canonicalize() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                match e.kind() {
+                                    std::io::ErrorKind::NotFound => {
+                                        // If the path does not exist, canonicalization will fail.
+                                        // Try to rebuild path based on canonicalization of parent
+                                        // though even that path may no longer exist.
+                                        if let Some(parent_path) = path.parent() {
+                                            if let Ok(mut parent_path_canonical) = parent_path.canonicalize() {
+                                                parent_path_canonical.push(path.file_name().unwrap());
+                                                parent_path_canonical
+                                            } else {
+                                                path.clone()
+                                            }
+                                        } else {
+                                            path.clone()
+                                        }
+                                    },
+                                    _ => path.clone(),
                                 }
-                            };
-                            assert!(relpath.is_relative());
-                            match config.filter(relpath) {
-                                FilterResult::Pass { ifft } => {
-                                    println!("  Match from config in: {:?}", config.root);
-                                    if let Some(ref name) = ifft.name {
-                                        println!("  Matched ifft: {}", name);
-                                    }
-                                    if let Some(ref if_cond) = ifft.if_cond {
-                                        println!("  Matched if-cond: {:?}", if_cond.glob());
-                                    }
+                            },
+                        };
 
-                                    then_tx
-                                        .send(Some((
-                                            timer.elapsed(),
-                                            cur_ifft_offset,
-                                            ifft.clone(),
-                                            Some(path.clone()),
-                                        )))
-                                        .unwrap();
-                                }
-                                FilterResult::Reject { global_not } => {
-                                    if let Some(global_not) = global_not {
-                                        println!("  Skip: global not: {:?}", global_not.glob());
+                        if canonical_path != path {
+                            paths.push(canonical_path);
+                        }
+                        for path in &paths {
+                            let mut ifft_offset = 0;
+                            for config in &configs {
+                                let cur_ifft_offset = ifft_offset.clone();
+                                ifft_offset += config.iffts.len();
+                                let relpath = match path.strip_prefix(&config.root) {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        continue;
                                     }
-                                    continue;
+                                };
+                                assert!(relpath.is_relative());
+                                match config.filter(relpath) {
+                                    FilterResult::Pass { ifft } => {
+                                        println!("  Match from config in: {:?}", config.root);
+                                        if let Some(ref name) = ifft.name {
+                                            println!("  Matched ifft: {}", name);
+                                        }
+                                        if let Some(ref if_cond) = ifft.if_cond {
+                                            println!("  Matched if-cond: {:?}", if_cond.glob());
+                                        }
+
+                                        then_tx
+                                            .send(Some((
+                                                timer.elapsed(),
+                                                cur_ifft_offset,
+                                                ifft.clone(),
+                                                Some(path.clone()),
+                                            )))
+                                            .unwrap();
+                                    }
+                                    FilterResult::Reject { global_not } => {
+                                        if let Some(global_not) = global_not {
+                                            println!("  Skip: global not: {:?}", global_not.glob());
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
                         }
