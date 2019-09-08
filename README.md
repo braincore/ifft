@@ -146,8 +146,8 @@ triggered on start with the `-r` flag.
 * Config files can be distributed throughout a directory tree.
 * Use glob patterns for `if` and `not` conditions.
 * Global `not` filtering and per-trigger `not` filtering.
-* Multiple events that trigger the same `if` are buffered and only trigger one
-  `then` execution.
+* If multiple events trigger the same `if`, `then` is only executed if an event
+  was triggered after the last time `then` was executed.
 * On start, iffts with a matching name can be triggered without any file event.
 * Events on paths with symlink components will also have their absolute-path
   equivalent tested against triggers.
