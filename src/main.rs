@@ -7,6 +7,8 @@ extern crate globset;
 use globset::Glob;
 extern crate notify;
 use notify::{raw_watcher, RecursiveMode, Watcher};
+extern crate notify_rust;
+use notify_rust::Notification;
 #[macro_use]
 extern crate serde_derive;
 extern crate shellexpand;
@@ -27,6 +29,7 @@ fn watch(
     configs: Vec<Config>,
     run_before_name: Option<String>,
     quit_after_run_before: bool,
+    show_desktop_notifications: bool,
 ) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
     // We use the raw_watcher rather than watcher with its debounce feature
@@ -45,7 +48,7 @@ fn watch(
         num_iffts += config.iffts.len();
     }
     thread::spawn(move || {
-        process_events(num_iffts, timer, then_rx);
+        process_events(num_iffts, timer, then_rx, show_desktop_notifications);
     });
 
     if run_before_name.is_some() {
@@ -161,6 +164,7 @@ fn process_events(
     num_iffts: usize,
     timer: Instant,
     rx: Receiver<Option<(Duration, usize, Ifft, Option<PathBuf>)>>,
+    show_desktop_notifications: bool,
 ) {
     let mut last_triggered = vec![None; num_iffts];
     loop {
@@ -198,15 +202,24 @@ fn process_events(
                     // conservative.
                     last_triggered[last_triggered_index] = Some(timer.elapsed());
                 }
+                let start_time = timer.elapsed();
                 let output_res = ifft.then_exec(&path);
                 if let Err(e) = output_res {
                     eprintln!("  >Skipping due to error: {}", e);
                     continue;
                 }
+                let exec_time = timer.elapsed() - start_time;
                 let output = output_res.unwrap();
-                if let Some(exit_code) = output.status.code() {
+                let exit_msg = if let Some(exit_code) = output.status.code() {
                     println!("  Exit code: {}", exit_code);
-                }
+                    if exit_code == 0 {
+                        String::from("completed")
+                    } else {
+                        format!("errored (code={})", exit_code)
+                    }
+                } else {
+                    String::from("unknown")
+                };
                 if let Ok(stdout) = String::from_utf8(output.stdout) {
                     println!("  Stdout:");
                     for line in stdout.lines() {
@@ -219,10 +232,27 @@ fn process_events(
                         println!("    {}", line)
                     }
                 }
+                if show_desktop_notifications {
+                    let res = Notification::new()
+                        .summary(format!("ifft: {} {}", exit_msg, ifft.config_parent_path).as_str())
+                        .body(
+                            format!("{}s: {}", approx_duration_as_string(exec_time), ifft.then)
+                                .as_str(),
+                        )
+                        .timeout(2000)
+                        .show();
+                    if let Err(e) = res {
+                        eprintln!("Error showing desktop notification: {:?}", e);
+                    }
+                }
             }
             Err(e) => eprintln!("process error: {:?}", e),
         }
     }
+}
+
+fn approx_duration_as_string(duration: Duration) -> String {
+    return format!("{}", duration.as_millis() as f64 / 1000f64);
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +302,7 @@ impl Config {
 #[derive(Clone, Debug)]
 struct Ifft {
     id: u32,
+    config_parent_path: String,
     name: Option<String>,
     working_dir: PathBuf,
     if_cond: Option<Glob>,
@@ -398,6 +429,7 @@ fn config_raw_to_config(
         };
         iffts.push(Ifft {
             id: ifft_counter,
+            config_parent_path: String::from(root.to_str().unwrap()),
             name: ifft_raw.name.clone(),
             working_dir,
             if_cond,
@@ -473,13 +505,21 @@ fn main() {
                 .required(false)
                 .short("q")
                 .long("quit")
-                .help("Quit after iffts matching run-before have been executed.."),
+                .help("Quit after iffts matching run-before have been executed."),
+        )
+        .arg(
+            Arg::with_name("NOTIFICATIONS")
+                .required(false)
+                .short("n")
+                .long("notifications")
+                .help("Show desktop notifications."),
         )
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
     let run_before_name = value_t!(matches, "RUN-BEFORE", String);
     let quit_after_run_before = matches.is_present("QUIT-AFTER-RUN-BEFORE");
+    let show_desktop_notifications = matches.is_present("NOTIFICATIONS");
     fn is_hidden(entry: &DirEntry) -> bool {
         entry
             .file_name()
@@ -508,6 +548,7 @@ fn main() {
         configs,
         run_before_name.ok(),
         quit_after_run_before,
+        show_desktop_notifications,
     ) {
         eprintln!("error: {:?}", e);
     }
@@ -620,6 +661,7 @@ mod tests {
     fn ifft_if() {
         let ifft = Ifft {
             id: 0,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
@@ -634,6 +676,7 @@ mod tests {
         // Test that a lack of if_cond rejects the path
         let ifft = Ifft {
             id: 0,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: None,
@@ -647,6 +690,7 @@ mod tests {
     fn ifft_not() {
         let ifft = Ifft {
             id: 0,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("a/b/c/**").unwrap()),
@@ -666,6 +710,7 @@ mod tests {
         // Test default working directory
         let ifft = Ifft {
             id: 0,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: None,
@@ -684,6 +729,7 @@ mod tests {
         // Test specified working_dir
         let ifft = Ifft {
             id: 1,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("/home"),
             if_cond: None,
@@ -699,18 +745,21 @@ mod tests {
         // Test non-existent working dir
         let ifft = Ifft {
             id: 2,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("/does-not-exist"),
             if_cond: None,
             nots: vec![],
             then: String::from("pwd"),
         };
-        ifft.then_exec(&Some(Path::new("/dummy").to_path_buf()))
-            .is_err();
+        assert!(ifft
+            .then_exec(&Some(Path::new("/dummy").to_path_buf()))
+            .is_err());
 
         // Test file path substitution
         let ifft = Ifft {
             id: 3,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: None,
@@ -726,6 +775,7 @@ mod tests {
         // Test file path substitution without path
         let ifft = Ifft {
             id: 3,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: None,
@@ -740,6 +790,7 @@ mod tests {
     fn config_not() {
         let ifft = Ifft {
             id: 0,
+            config_parent_path: "".to_string(),
             name: None,
             working_dir: PathBuf::from("."),
             if_cond: Some(Glob::new("c/d/**").unwrap()),
