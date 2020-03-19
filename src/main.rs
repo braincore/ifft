@@ -17,7 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Output};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 extern crate toml;
@@ -47,33 +47,59 @@ fn watch(
     for config in &configs {
         num_iffts += config.iffts.len();
     }
+
+    let then_tx_clone = then_tx.clone();
+    let configs_clone = configs.clone();
     thread::spawn(move || {
-        process_events(num_iffts, timer, then_rx, show_desktop_notifications);
+        process_events(
+            num_iffts,
+            timer,
+            then_rx,
+            then_tx_clone,
+            configs_clone,
+            show_desktop_notifications,
+        );
     });
 
     if run_before_name.is_some() {
-        let mut ifft_offset = 0;
+        let mut all_iffts = vec![];
         for config in &configs {
             for ifft in &config.iffts {
                 if ifft.name == run_before_name {
                     if ifft.then_needs_path_sub() {
                         println!(
                             "Run-Before: Ignoring ifft b/c it needs a path sub: {:?}",
-                            config.root
+                            ifft.config_parent_path
                         );
                     } else {
-                        println!("Run-Before: Match ifft name in config: {:?}", config.root);
-                        then_tx
-                            .send(Some((timer.elapsed(), ifft_offset, ifft.clone(), None)))
-                            .unwrap();
+                        all_iffts.push(ifft);
                     }
                 }
             }
-            ifft_offset += config.iffts.len();
+        }
+        let linearized_iffts = linearize_iffts(all_iffts.clone());
+        if let Ok(linearized_iffts) = linearized_iffts {
+            for ifft in &linearized_iffts {
+                if ifft.name == run_before_name {
+                    println!(
+                        "Run-Before: Match ifft name in config: {:?}",
+                        ifft.config_parent_path
+                    );
+                    then_tx
+                        .send(Some((timer.elapsed(), ifft.clone(), None)))
+                        .unwrap();
+                }
+            }
+        } else {
+            // TODO: Print reason for error.
+            assert!(
+                false,
+                "`after` specification could not be satisfied (cycle or bad ref)."
+            );
         }
     }
     if quit_after_run_before {
-        then_tx.send(None).unwrap();
+        then_tx.send(None).expect("Failed to send quit signal.");
     }
 
     loop {
@@ -114,10 +140,7 @@ fn watch(
                         paths.push(canonical_path);
                     }
                     for path in &paths {
-                        let mut ifft_offset = 0;
                         for config in &configs {
-                            let cur_ifft_offset = ifft_offset.clone();
-                            ifft_offset += config.iffts.len();
                             let relpath = match path.strip_prefix(&config.root) {
                                 Ok(p) => p,
                                 Err(_) => {
@@ -131,14 +154,13 @@ fn watch(
                                     if let Some(ref name) = ifft.name {
                                         println!("  Matched ifft: {}", name);
                                     }
-                                    if let Some(ref if_cond) = ifft.if_cond {
-                                        println!("  Matched if-cond: {:?}", if_cond.glob());
+                                    if let IfCond::Glob(ref if_cond_glob) = ifft.if_cond {
+                                        println!("  Matched if-cond: {:?}", if_cond_glob.glob());
                                     }
 
                                     then_tx
                                         .send(Some((
                                             timer.elapsed(),
-                                            cur_ifft_offset,
                                             ifft.clone(),
                                             Some(path.clone()),
                                         )))
@@ -160,10 +182,62 @@ fn watch(
     }
 }
 
+/// Linearize iffts.
+///
+/// Iffts may specify an "on start" dependency on another ifft. This
+/// relationship can be modeled as a DAG. The output is a linearization of the
+/// DAG.
+///
+/// If there's a cycle or if a bad ref is made, returns Err.
+fn linearize_iffts(mut all_iffts: Vec<&Ifft>) -> Result<Vec<Ifft>, ()> {
+    let mut linearized_iffts: Vec<Ifft> = vec![];
+    let mut prev_len = all_iffts.len();
+    loop {
+        if all_iffts.len() == 0 {
+            break;
+        }
+        for i in 0..all_iffts.len() {
+            let ifft = all_iffts[i];
+            if let IfCond::OnStartListen(after) = &ifft.if_cond {
+                let mut found = false;
+                for linearized_ifft in &linearized_iffts {
+                    if linearized_ifft.emit.is_some()
+                        && *after
+                            == (
+                                linearized_ifft.config_parent_path.clone(),
+                                linearized_ifft.emit.clone().unwrap(),
+                            )
+                    {
+                        linearized_iffts.push(ifft.clone());
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    all_iffts.remove(i);
+                    break;
+                }
+            } else {
+                linearized_iffts.push(ifft.clone());
+                all_iffts.remove(i);
+                break;
+            }
+        }
+        if prev_len == all_iffts.len() {
+            return Err(());
+        } else {
+            prev_len = all_iffts.len();
+        }
+    }
+    Ok(linearized_iffts)
+}
+
 fn process_events(
     num_iffts: usize,
     timer: Instant,
-    rx: Receiver<Option<(Duration, usize, Ifft, Option<PathBuf>)>>,
+    rx: Receiver<Option<(Duration, Ifft, Option<PathBuf>)>>,
+    tx: Sender<Option<(Duration, Ifft, Option<PathBuf>)>>,
+    configs: Vec<Config>,
     show_desktop_notifications: bool,
 ) {
     let mut last_triggered = vec![None; num_iffts];
@@ -174,7 +248,7 @@ fn process_events(
                     println!("Exiting...");
                     exit(0);
                 }
-                let (ts, cur_ifft_offset, ifft, path) = msg.unwrap();
+                let (ts, ifft, path) = msg.unwrap();
                 let date = Utc::now();
                 println!(
                     "[{}] Execute: {:?} from {:?}",
@@ -182,7 +256,7 @@ fn process_events(
                     ifft.then,
                     ifft.working_dir,
                 );
-                let last_triggered_index = cur_ifft_offset + ifft.id as usize;
+                let last_triggered_index = ifft.id as usize;
                 if let Some(last_triggered) = last_triggered[last_triggered_index] {
                     if last_triggered > ts {
                         println!(
@@ -210,9 +284,11 @@ fn process_events(
                 }
                 let exec_time = timer.elapsed() - start_time;
                 let output = output_res.unwrap();
+                let mut success = false;
                 let exit_msg = if let Some(exit_code) = output.status.code() {
                     println!("  Exit code: {}", exit_code);
                     if exit_code == 0 {
+                        success = true;
                         String::from("completed")
                     } else {
                         format!("errored (code={})", exit_code)
@@ -234,7 +310,14 @@ fn process_events(
                 }
                 if show_desktop_notifications {
                     let res = Notification::new()
-                        .summary(format!("ifft: {} {}", exit_msg, ifft.config_parent_path).as_str())
+                        .summary(
+                            format!(
+                                "ifft: {} {}",
+                                exit_msg,
+                                path_to_string(&ifft.config_parent_path)
+                            )
+                            .as_str(),
+                        )
                         .body(
                             format!("{}s: {}", approx_duration_as_string(exec_time), ifft.then)
                                 .as_str(),
@@ -243,6 +326,26 @@ fn process_events(
                         .show();
                     if let Err(e) = res {
                         eprintln!("Error showing desktop notification: {:?}", e);
+                    }
+                }
+                if success {
+                    if let Some(emit_id) = ifft.emit_id() {
+                        for config in &configs {
+                            for maybe_triggered_ifft in &config.iffts {
+                                if let IfCond::Listen(target) = &maybe_triggered_ifft.if_cond {
+                                    if target == &emit_id {
+                                        // FIXME: An ifft with a listen_cond cannot use {{}} in the `then` clause.
+                                        // Catch and report violations of this.
+                                        tx.send(Some((
+                                            timer.elapsed(),
+                                            maybe_triggered_ifft.clone(),
+                                            None,
+                                        )))
+                                        .expect("Failed to enqueue ifft task triggered by emit.");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -271,9 +374,11 @@ struct IfftRaw {
     if_cond: Option<String>,
     not: Option<Vec<String>>,
     then: String,
+    after: Option<String>,
+    emit: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Config {
     root: PathBuf,
     nots: Vec<Glob>,
@@ -301,24 +406,26 @@ impl Config {
 
 #[derive(Clone, Debug)]
 struct Ifft {
+    // At first an ID specific to the config this belongs to, and then later
+    // made into a global, unique ID across all configs.
     id: u32,
-    config_parent_path: String,
+    config_parent_path: PathBuf,
     name: Option<String>,
     working_dir: PathBuf,
-    if_cond: Option<Glob>,
+    if_cond: IfCond,
     nots: Vec<Glob>,
     then: String,
+    emit: Option<String>,
 }
 
 impl Ifft {
     fn filter(&self, relpath: &Path) -> bool {
         assert!(relpath.is_relative());
-        if let Some(ref if_cond) = self.if_cond {
-            if !if_cond.compile_matcher().is_match(&relpath) {
+        if let IfCond::Glob(ref if_cond_glob) = self.if_cond {
+            if !if_cond_glob.compile_matcher().is_match(&relpath) {
                 return false;
             }
         } else {
-            // If no if_cond, never match.
             return false;
         }
         for not in &self.nots {
@@ -346,6 +453,14 @@ impl Ifft {
         cmd.arg("-c").arg(&then);
         cmd.current_dir(&self.working_dir);
         cmd.output()
+    }
+
+    fn emit_id(&self) -> Option<ListenTarget> {
+        if let Some(ref emit) = self.emit {
+            Some((self.config_parent_path.clone(), emit.clone()))
+        } else {
+            None
+        }
     }
 }
 
@@ -409,13 +524,16 @@ fn config_raw_to_config(
                 nots.push(try_glob.unwrap());
             }
         }
-        let mut if_cond = None;
+        let if_cond;
         if let Some(ref if_cond_raw) = ifft_raw.if_cond {
-            let try_glob = Glob::new(&if_cond_raw);
-            if let Err(e) = try_glob {
-                return Err(format!("ifft.if: {}", e));
+            if_cond = match parse_if_cond(&root, if_cond_raw.clone()) {
+                Ok(res) => res,
+                Err(e) => {
+                    return Err(e);
+                }
             }
-            if_cond = Some(try_glob.unwrap())
+        } else {
+            if_cond = IfCond::None;
         }
         let working_dir = if let Some(ref working_dir_raw) = ifft_raw.working_dir {
             let test_path = PathBuf::from(working_dir_raw);
@@ -429,12 +547,13 @@ fn config_raw_to_config(
         };
         iffts.push(Ifft {
             id: ifft_counter,
-            config_parent_path: String::from(root.to_str().unwrap()),
+            config_parent_path: root.clone(),
             name: ifft_raw.name.clone(),
             working_dir,
             if_cond,
             nots,
             then: ifft_raw.then.clone(),
+            emit: ifft_raw.emit.clone(),
         });
         ifft_counter += 1;
     }
@@ -446,7 +565,69 @@ fn config_raw_to_config(
     })
 }
 
-fn read_and_parse_config(config_path: String) -> Config {
+fn parse_listen_string(root: &PathBuf, listen: String) -> Result<ListenTarget, ()> {
+    let listen_with_prefix = String::from(listen);
+    let listen_str;
+    if listen_with_prefix.starts_with("listen:") {
+        listen_str = &listen_with_prefix[7..];
+    } else if listen_with_prefix.starts_with("on_start_listen:") {
+        listen_str = &listen_with_prefix[16..];
+    } else {
+        return Err(());
+    }
+    let mut listen_iter = listen_str.rsplitn(2, ":");
+    let listen_trigger = listen_iter.next();
+    if listen_trigger.is_none() {
+        return Err(());
+    }
+    let listen_path_str = listen_iter.next();
+    if listen_path_str.is_none() {
+        return Err(());
+    }
+    let listen_path = root
+        .join(PathBuf::from(listen_path_str.unwrap()))
+        .canonicalize()
+        .expect("Could not canonicalize path.");
+    Ok((listen_path, String::from(listen_trigger.unwrap())))
+}
+
+type ListenTarget = (PathBuf, String);
+
+#[derive(Clone, Debug)]
+enum IfCond {
+    Glob(Glob),
+    Listen(ListenTarget),
+    OnStartListen(ListenTarget),
+    None,
+}
+
+fn parse_if_cond(root: &PathBuf, if_cond_raw: String) -> Result<IfCond, String> {
+    if if_cond_raw.starts_with("listen:") {
+        if let Ok(listen_target) = parse_listen_string(&root, if_cond_raw) {
+            Ok(IfCond::Listen(listen_target))
+        } else {
+            Err(String::from(
+                "ifft.if: Bad listen format: \"listen:PATH:TRIGGER\"",
+            ))
+        }
+    } else if if_cond_raw.starts_with("on_start_listen") {
+        if let Ok(listen_target) = parse_listen_string(&root, if_cond_raw) {
+            Ok(IfCond::OnStartListen(listen_target))
+        } else {
+            Err(String::from(
+                "ifft.if: Bad on_start_listen format: \"on_start_listen:PATH:TRIGGER\"",
+            ))
+        }
+    } else {
+        let try_glob = Glob::new(&if_cond_raw);
+        if let Err(e) = try_glob {
+            return Err(format!("ifft.if: {}", e));
+        }
+        Ok(IfCond::Glob(try_glob.unwrap()))
+    }
+}
+
+fn read_and_parse_config(config_path: PathBuf) -> Config {
     let contents = match fs::read_to_string(&config_path) {
         Ok(res) => res,
         Err(e) => {
@@ -529,6 +710,7 @@ fn main() {
     }
 
     let walker = WalkDir::new(&watch_path).into_iter();
+    let mut num_iffts = 0;
     for entry in walker.filter_entry(|e| !is_hidden(e)) {
         if let Err(e) = entry {
             println!("error: {}", e);
@@ -540,7 +722,12 @@ fn main() {
             continue;
         }
         println!("Found config: {:?}", path);
-        let config = read_and_parse_config(path_to_string(&path));
+        let mut config = read_and_parse_config(path);
+        // Convert the config-specific IDs to unique, sequential global IDs.
+        for ifft in &mut config.iffts {
+            ifft.id += num_iffts;
+        }
+        num_iffts += config.iffts.len() as u32;
         configs.push(config);
     }
     if let Err(e) = watch(
@@ -557,7 +744,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        config_raw_to_config, Config, ConfigRaw, FilterResult, Glob, Ifft, IfftRaw, Path, PathBuf,
+        config_raw_to_config, linearize_iffts, Config, ConfigRaw, FilterResult, Glob, IfCond, Ifft,
+        IfftRaw, Path, PathBuf,
     };
     use std::env;
 
@@ -615,12 +803,54 @@ mod tests {
                 if_cond: Some(String::from("***")),
                 not: None,
                 then: String::from("ls"),
+                after: None,
+                emit: None,
             }],
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
             res.unwrap_err(),
             "ifft.if: error parsing glob '***': invalid use of **; must be one path component"
+        );
+
+        // Test bad ifft.if listen
+        let config_raw = ConfigRaw {
+            root: Some(String::from("~")),
+            not: None,
+            ifft: vec![IfftRaw {
+                name: None,
+                working_dir: None,
+                if_cond: Some(String::from("listen:../another-proj")),
+                not: None,
+                then: String::from("ls"),
+                after: None,
+                emit: None,
+            }],
+        };
+        let res = config_raw_to_config(config_raw, "/home".to_string());
+        assert_eq!(
+            res.unwrap_err(),
+            "ifft.if: Bad listen format: \"listen:PATH:TRIGGER\""
+        );
+
+        // Test bad ifft.if on start listen
+        let config_raw = ConfigRaw {
+            root: Some(String::from("~")),
+            not: None,
+            ifft: vec![IfftRaw {
+                name: None,
+                working_dir: None,
+                if_cond: Some(String::from("on_start_listen:../another-proj")),
+                not: None,
+                then: String::from("ls"),
+                after: None,
+                emit: None,
+            }],
+        };
+        let res = config_raw_to_config(config_raw, "/home".to_string());
+        assert_eq!(
+            res.unwrap_err(),
+            "ifft.if: Bad on_start_listen format: \"on_start_listen:PATH:TRIGGER\""
         );
 
         // Test bad ifft.not glob
@@ -633,6 +863,8 @@ mod tests {
                 if_cond: None,
                 not: Some(vec![String::from("***")]),
                 then: String::from("ls"),
+                after: None,
+                emit: None,
             }],
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
@@ -651,6 +883,8 @@ mod tests {
                 if_cond: None,
                 not: None,
                 then: String::from("ls"),
+                after: None,
+                emit: None,
             }],
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
@@ -661,12 +895,13 @@ mod tests {
     fn ifft_if() {
         let ifft = Ifft {
             id: 0,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: Some(Glob::new("a/b/c/**").unwrap()),
+            if_cond: IfCond::Glob(Glob::new("a/b/c/**").unwrap()),
             nots: vec![],
             then: String::from("ls"),
+            emit: None,
         };
         // Test pass case
         assert!(ifft.filter(&PathBuf::from("a/b/c/d")));
@@ -676,12 +911,13 @@ mod tests {
         // Test that a lack of if_cond rejects the path
         let ifft = Ifft {
             id: 0,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("ls"),
+            emit: None,
         };
         assert!(!ifft.filter(&PathBuf::from("a/b")));
     }
@@ -690,12 +926,13 @@ mod tests {
     fn ifft_not() {
         let ifft = Ifft {
             id: 0,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: Some(Glob::new("a/b/c/**").unwrap()),
+            if_cond: IfCond::Glob(Glob::new("a/b/c/**").unwrap()),
             nots: vec![Glob::new("*.swp").unwrap(), Glob::new("*.pyc").unwrap()],
             then: String::from("ls"),
+            emit: None,
         };
         // Test pass case
         assert!(ifft.filter(&PathBuf::from("a/b/c/d")));
@@ -710,12 +947,13 @@ mod tests {
         // Test default working directory
         let ifft = Ifft {
             id: 0,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("pwd"),
+            emit: None,
         };
         let output = ifft
             .then_exec(&Some(Path::new("/dummy").to_path_buf()))
@@ -729,12 +967,13 @@ mod tests {
         // Test specified working_dir
         let ifft = Ifft {
             id: 1,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("/home"),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("pwd"),
+            emit: None,
         };
         let output = ifft
             .then_exec(&Some(Path::new("/dummy").to_path_buf()))
@@ -745,12 +984,13 @@ mod tests {
         // Test non-existent working dir
         let ifft = Ifft {
             id: 2,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("/does-not-exist"),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("pwd"),
+            emit: None,
         };
         assert!(ifft
             .then_exec(&Some(Path::new("/dummy").to_path_buf()))
@@ -759,12 +999,13 @@ mod tests {
         // Test file path substitution
         let ifft = Ifft {
             id: 3,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("echo {{}}"),
+            emit: None,
         };
         let output = ifft
             .then_exec(&Some(Path::new("/a/b/c").to_path_buf()))
@@ -775,12 +1016,13 @@ mod tests {
         // Test file path substitution without path
         let ifft = Ifft {
             id: 3,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: None,
+            if_cond: IfCond::None,
             nots: vec![],
             then: String::from("echo {{}}"),
+            emit: None,
         };
         let result = std::panic::catch_unwind(|| ifft.then_exec(&None).unwrap());
         assert!(result.is_err());
@@ -790,12 +1032,13 @@ mod tests {
     fn config_not() {
         let ifft = Ifft {
             id: 0,
-            config_parent_path: "".to_string(),
+            config_parent_path: PathBuf::from(""),
             name: None,
             working_dir: PathBuf::from("."),
-            if_cond: Some(Glob::new("c/d/**").unwrap()),
+            if_cond: IfCond::Glob(Glob::new("c/d/**").unwrap()),
             nots: vec![],
             then: String::from("ls"),
+            emit: None,
         };
         let config = Config {
             root: PathBuf::from("/a/b"),
@@ -815,5 +1058,61 @@ mod tests {
             FilterResult::Pass { .. } => assert!(false),
             FilterResult::Reject { global_not } => assert_eq!(global_not.unwrap(), &config.nots[0]),
         }
+    }
+
+    #[test]
+    fn test_linearize_iffts() {
+        let ifft1 = Ifft {
+            id: 0,
+            config_parent_path: PathBuf::from("/a"),
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: IfCond::Glob(Glob::new("c/d/**").unwrap()),
+            nots: vec![],
+            then: String::from("ls"),
+            emit: None,
+        };
+        let ifft2 = Ifft {
+            id: 0,
+            config_parent_path: PathBuf::from("/b"),
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: IfCond::OnStartListen((PathBuf::from("/c"), String::from("built"))),
+            nots: vec![],
+            then: String::from("ls"),
+            emit: Some(String::from("built")),
+        };
+        let ifft3 = Ifft {
+            id: 0,
+            config_parent_path: PathBuf::from("/c"),
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: IfCond::OnStartListen((PathBuf::from("/b"), String::from("built"))),
+            nots: vec![],
+            then: String::from("ls"),
+            emit: Some(String::from("built")),
+        };
+        let ifft4 = Ifft {
+            id: 0,
+            config_parent_path: PathBuf::from("/c"),
+            name: None,
+            working_dir: PathBuf::from("."),
+            if_cond: IfCond::Glob(Glob::new("c/d/**").unwrap()),
+            nots: vec![],
+            then: String::from("ls"),
+            emit: Some(String::from("built")),
+        };
+
+        // Try dependency cycles
+        let res = linearize_iffts(vec![&ifft1, &ifft2, &ifft3]);
+        assert!(res.is_err(), "Expected cycle error");
+
+        // Try incomplete dependencies
+        let res = linearize_iffts(vec![&ifft1, &ifft2]);
+        assert!(res.is_err(), "Expected cycle error");
+
+        // Test working case
+        let res = linearize_iffts(vec![&ifft1, &ifft2, &ifft4]);
+        assert!(res.is_ok(), "Expected to work");
     }
 }
