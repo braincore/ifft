@@ -27,15 +27,15 @@ use walkdir::{DirEntry, WalkDir};
 fn watch(
     watch_path: String,
     configs: Vec<Config>,
-    run_before_name: Option<String>,
-    quit_after_run_before: bool,
+    on_start_name: Option<String>,
+    quit_after_on_start: bool,
     show_desktop_notifications: bool,
 ) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
     // We use the raw_watcher rather than watcher with its debounce feature
     // because the latter hangs when too many fs events are generated :(
     let mut watcher = raw_watcher(event_tx)?;
-    if !quit_after_run_before {
+    if !quit_after_on_start {
         let canonical_watch_path = PathBuf::from(watch_path).canonicalize().unwrap();
         watcher.watch(&canonical_watch_path, RecursiveMode::Recursive)?;
     }
@@ -61,14 +61,14 @@ fn watch(
         );
     });
 
-    if run_before_name.is_some() {
+    if on_start_name.is_some() {
         let mut all_iffts = vec![];
         for config in &configs {
             for ifft in &config.iffts {
-                if ifft.name == run_before_name {
+                if ifft.name == on_start_name {
                     if ifft.then_needs_path_sub() {
                         println!(
-                            "Run-Before: Ignoring ifft b/c it needs a path sub: {:?}",
+                            "On-Start: Ignoring ifft b/c it needs a path sub: {:?}",
                             ifft.config_parent_path
                         );
                     } else {
@@ -80,9 +80,9 @@ fn watch(
         let linearized_iffts = linearize_iffts(all_iffts.clone());
         if let Ok(linearized_iffts) = linearized_iffts {
             for ifft in &linearized_iffts {
-                if ifft.name == run_before_name {
+                if ifft.name == on_start_name {
                     println!(
-                        "Run-Before: Match ifft name in config: {:?}",
+                        "On-Start: Match ifft name in config: {:?}",
                         ifft.config_parent_path
                     );
                     then_tx
@@ -94,11 +94,11 @@ fn watch(
             // TODO: Print reason for error.
             assert!(
                 false,
-                "`after` specification could not be satisfied (cycle or bad ref)."
+                "`on_start_listen` could not be satisfied (cycle or bad ref)."
             );
         }
     }
-    if quit_after_run_before {
+    if quit_after_on_start {
         then_tx.send(None).expect("Failed to send quit signal.");
     }
 
@@ -678,7 +678,15 @@ fn main() {
                 .required(false)
                 .short("r")
                 .long("run")
-                .help("Run all iffts with specified name before watching.")
+                .help("DEPRECATED BY -s: Run all iffts with specified name before watching.")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("ON-START")
+                .required(false)
+                .short("s")
+                .long("on-start")
+                .help("On start, run all iffts with specified name before watching.")
                 .takes_value(true),
         )
         .arg(
@@ -698,8 +706,9 @@ fn main() {
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
+    let on_start_name = value_t!(matches, "ON-START", String);
     let run_before_name = value_t!(matches, "RUN-BEFORE", String);
-    let quit_after_run_before = matches.is_present("QUIT-AFTER-RUN-BEFORE");
+    let quit_after_on_start = matches.is_present("QUIT-AFTER-RUN-BEFORE");
     let show_desktop_notifications = matches.is_present("NOTIFICATIONS");
     fn is_hidden(entry: &DirEntry) -> bool {
         entry
@@ -733,8 +742,8 @@ fn main() {
     if let Err(e) = watch(
         watch_path,
         configs,
-        run_before_name.ok(),
-        quit_after_run_before,
+        on_start_name.ok().or(run_before_name.ok()),
+        quit_after_on_start,
         show_desktop_notifications,
     ) {
         eprintln!("error: {:?}", e);
