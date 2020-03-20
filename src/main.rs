@@ -25,7 +25,7 @@ extern crate walkdir;
 use walkdir::{DirEntry, WalkDir};
 
 fn watch(
-    watch_path: String,
+    watch_path: PathBuf,
     configs: Vec<Config>,
     on_start_name: Option<String>,
     quit_after_on_start: bool,
@@ -36,8 +36,7 @@ fn watch(
     // because the latter hangs when too many fs events are generated :(
     let mut watcher = raw_watcher(event_tx)?;
     if !quit_after_on_start {
-        let canonical_watch_path = PathBuf::from(watch_path).canonicalize().unwrap();
-        watcher.watch(&canonical_watch_path, RecursiveMode::Recursive)?;
+        watcher.watch(&watch_path, RecursiveMode::Recursive)?;
     }
 
     let timer = Instant::now();
@@ -669,8 +668,9 @@ fn main() {
         .about("IF Filesystem-event Then")
         .arg(
             Arg::with_name("WATCH-PATH")
+                .default_value(".")
                 .required(true)
-                .help("The path to an IFFT config file (.toml).")
+                .help("The path to a directory tree containing IFFT config files (.toml).")
                 .takes_value(true),
         )
         .arg(
@@ -718,7 +718,10 @@ fn main() {
             .unwrap_or(false)
     }
 
-    let walker = WalkDir::new(&watch_path).into_iter();
+    let canonical_watch_path = PathBuf::from(watch_path)
+        .canonicalize()
+        .expect("Bad watch patch.");
+    let walker = WalkDir::new(&canonical_watch_path).into_iter();
     let mut num_iffts = 0;
     for entry in walker.filter_entry(|e| !is_hidden(e)) {
         if let Err(e) = entry {
@@ -740,7 +743,7 @@ fn main() {
         configs.push(config);
     }
     if let Err(e) = watch(
-        watch_path,
+        canonical_watch_path,
         configs,
         on_start_name.ok().or(run_before_name.ok()),
         quit_after_on_start,
