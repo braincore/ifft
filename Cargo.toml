@@ -1,6 +1,6 @@
 [package]
 name = "ifft"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Ken Elkabany <ken@elkabany.com>"]
 license = "MIT"
 description = "IF Filsystem-event Then..."
