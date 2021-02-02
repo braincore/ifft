@@ -5,6 +5,7 @@ extern crate clap;
 use clap::{App, Arg};
 extern crate globset;
 use globset::Glob;
+extern crate ignore;
 extern crate notify;
 use notify::{raw_watcher, RecursiveMode, Watcher};
 extern crate notify_rust;
@@ -21,8 +22,6 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 extern crate toml;
-extern crate walkdir;
-use walkdir::{DirEntry, WalkDir};
 
 fn watch(
     watch_path: PathBuf,
@@ -703,6 +702,12 @@ fn main() {
                 .long("notifications")
                 .help("Show desktop notifications."),
         )
+        .arg(
+            Arg::with_name("NO-IGNORE")
+                .required(false)
+                .long("no-ignore")
+                .help("Do not respect (git)ignore files."),
+        )
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
@@ -710,37 +715,36 @@ fn main() {
     let run_before_name = value_t!(matches, "RUN-BEFORE", String);
     let quit_after_on_start = matches.is_present("QUIT-AFTER-RUN-BEFORE");
     let show_desktop_notifications = matches.is_present("NOTIFICATIONS");
-    fn is_hidden(entry: &DirEntry) -> bool {
-        entry
-            .file_name()
-            .to_str()
-            .map(|s| s.starts_with("."))
-            .unwrap_or(false)
-    }
+    let no_ignore = matches.is_present("NO-IGNORE");
 
     let canonical_watch_path = PathBuf::from(watch_path)
         .canonicalize()
         .expect("Bad watch patch.");
-    let walker = WalkDir::new(&canonical_watch_path).into_iter();
-    let mut num_iffts = 0;
-    for entry in walker.filter_entry(|e| !is_hidden(e)) {
-        if let Err(e) = entry {
-            println!("error: {}", e);
-            continue;
+
+    {
+        let mut num_iffts = 0;
+        let walker = ignore::WalkBuilder::new(&canonical_watch_path)
+            .standard_filters(!no_ignore)
+            .build();
+        for entry in walker {
+            if let Err(e) = entry {
+                println!("error: {}", e);
+                continue;
+            }
+            let entry = entry.unwrap();
+            let path = entry.into_path();
+            if !(path.is_file() && path.file_name().unwrap() == "ifft.toml") {
+                continue;
+            }
+            println!("Found config: {:?}", path);
+            let mut config = read_and_parse_config(path);
+            // Convert the config-specific IDs to unique, sequential global IDs.
+            for ifft in &mut config.iffts {
+                ifft.id += num_iffts;
+            }
+            num_iffts += config.iffts.len() as u32;
+            configs.push(config);
         }
-        let entry = entry.unwrap();
-        let path = entry.into_path();
-        if !(path.is_file() && path.file_name().unwrap() == "ifft.toml") {
-            continue;
-        }
-        println!("Found config: {:?}", path);
-        let mut config = read_and_parse_config(path);
-        // Convert the config-specific IDs to unique, sequential global IDs.
-        for ifft in &mut config.iffts {
-            ifft.id += num_iffts;
-        }
-        num_iffts += config.iffts.len() as u32;
-        configs.push(config);
     }
     if let Err(e) = watch(
         canonical_watch_path,

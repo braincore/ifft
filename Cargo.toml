@@ -12,13 +12,13 @@ readme = "README.md"
 chrono = "0.4.6"
 clap = "2.32"
 globset = "0.4.2"
-notify = "^4.0.0"
+ignore = "0.4"
+notify = "=4.0.11"
 notify-rust = "3.6.2"
 serde = "1.0"
 serde_derive = "1.0"
 shellexpand = "1.0"
 toml = "0.4"
-walkdir = "2"
 
 [badges]
 travis-ci = { repository = "braincore/ifft" }

@@ -283,20 +283,38 @@ dependencies = [
  "chrono",
  "clap",
  "globset",
+ "ignore",
  "notify",
  "notify-rust",
  "serde",
  "serde_derive",
  "shellexpand",
  "toml",
+]
+
+[[package]]
+name = "ignore"
+version = "0.4.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b287fb45c60bb826a0dc68ff08742b9d88a2fea13d6e0c286b3172065aaf878c"
+dependencies = [
+ "crossbeam-utils",
+ "globset",
+ "lazy_static",
+ "log",
+ "memchr",
+ "regex",
+ "same-file",
+ "thread_local",
  "walkdir",
+ "winapi-util",
 ]
 
 [[package]]
 name = "inotify"
-version = "0.7.1"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4816c66d2c8ae673df83366c18341538f234a26d65a9ecea5c348b453ac1d02f"
+checksum = "40b54539f3910d6f84fbf9a643efd6e3aa6e4f001426c0329576128255994718"
 dependencies = [
  "bitflags",
  "inotify-sys",
@@ -450,15 +468,16 @@ dependencies = [
 
 [[package]]
 name = "notify"
-version = "4.0.15"
+version = "4.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80ae4a7688d1fab81c5bf19c64fc8db920be8d519ce6336ed4e7efe024724dbd"
+checksum = "ceb1a496a81dd6125f68ce772b41b83efe89a54d21768ed6d0c33c95832604e6"
 dependencies = [
  "bitflags",
  "filetime",
  "fsevent",
  "fsevent-sys",
  "inotify",
+ "kernel32-sys",
  "libc",
  "mio",
  "mio-extras",
