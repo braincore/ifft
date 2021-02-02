@@ -234,6 +234,8 @@ in the correct order: first `my-c-service`; second `my-rust-service`.
 * Dependencies
   * An ifft can be triggered by listening for an emitted tag from another.
   * On start, iffts can be ordered via a dependency graph.
+* Respects ignore files (hidden, `.gitignore`, ...) for config collection and
+  folder watching.
 
 ## Platforms
 
@@ -254,9 +256,8 @@ notifications. You'll need to use a separate filesystem event forwarder such as
 
 ## Todo
 
-* [ ] Add `.gitignore` parsing support.
-* [ ] Flag to ignore hidden files.
-* [ ] Flag to control verbosity of prints.
+* [ ] Respect ignore files for triggered files.
+* [ ] Multi-level flag to control verbosity of prints.
 * [ ] Group events in quick succession together and trigger only once.
 * [ ] Allow customization of type of FS events that trigger.
 * [ ] Low priority: Compute the optimal path prefix for watching.

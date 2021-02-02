@@ -7,7 +7,8 @@ extern crate globset;
 use globset::Glob;
 extern crate ignore;
 extern crate notify;
-use notify::{raw_watcher, RecursiveMode, Watcher};
+use notify::immediate_watcher;
+use notify::{RecursiveMode, Watcher};
 extern crate notify_rust;
 use notify_rust::Notification;
 #[macro_use]
@@ -29,13 +30,45 @@ fn watch(
     on_start_name: Option<String>,
     quit_after_on_start: bool,
     show_desktop_notifications: bool,
+    verbose: bool,
 ) -> notify::Result<()> {
     let (event_tx, event_rx) = channel();
-    // We use the raw_watcher rather than watcher with its debounce feature
-    // because the latter hangs when too many fs events are generated :(
-    let mut watcher = raw_watcher(event_tx)?;
+    // We don't use the debounce feature because the old one in notify 4.x had
+    // a tendency to hang. Haven't tried the one in 5.x.
+    let mut watcher = immediate_watcher(move |res| match res {
+        Ok(event) => {
+            if let Err(e) = event_tx.send(event) {
+                println!("send error: {:?}", e);
+            }
+        }
+        Err(e) => println!("watch error: {:?}", e),
+    })
+    .unwrap();
     if !quit_after_on_start {
-        watcher.watch(&watch_path, RecursiveMode::Recursive)?;
+        // The recursive mode built into notify has a tendency to go bonkers
+        // and consume GBs of RAM and hang the process. It also doesn't support
+        // filtering out certain paths. So instead, use our own walker. The
+        // downside, is that there is no logic (yet) for watching new folders
+        // that are added.
+        let walker = ignore::WalkBuilder::new(&watch_path)
+            .standard_filters(true)
+            .build();
+        for entry in walker {
+            if let Err(e) = entry {
+                println!("error: {}", e);
+                continue;
+            }
+            let entry = entry.unwrap();
+            let path = entry.into_path();
+            if !path.is_dir() {
+                continue;
+            } else {
+                if verbose {
+                    println!("Watching folder: {:?}", &path);
+                }
+                watcher.watch(&path, RecursiveMode::NonRecursive)?;
+            }
+        }
     }
 
     let timer = Instant::now();
@@ -105,7 +138,7 @@ fn watch(
             Ok(event) => {
                 let date = Utc::now();
                 println!("[{}] Event: {:?}", date.format("%Y-%m-%d %H:%M:%SZ"), event);
-                if let Some(path) = event.path {
+                for path in event.paths {
                     assert!(path.is_absolute());
                     let mut paths = vec![path.clone()];
                     let canonical_path = match path.canonicalize() {
@@ -708,6 +741,12 @@ fn main() {
                 .long("no-ignore")
                 .help("Do not respect (git)ignore files."),
         )
+        .arg(
+            Arg::with_name("VERBOSE")
+                .required(false)
+                .short("v")
+                .long("--verbose"),
+        )
         .get_matches();
     let mut configs = vec![];
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
@@ -716,6 +755,7 @@ fn main() {
     let quit_after_on_start = matches.is_present("QUIT-AFTER-RUN-BEFORE");
     let show_desktop_notifications = matches.is_present("NOTIFICATIONS");
     let no_ignore = matches.is_present("NO-IGNORE");
+    let verbose = matches.is_present("VERBOSE");
 
     let canonical_watch_path = PathBuf::from(watch_path)
         .canonicalize()
@@ -752,6 +792,7 @@ fn main() {
         on_start_name.ok().or(run_before_name.ok()),
         quit_after_on_start,
         show_desktop_notifications,
+        verbose,
     ) {
         eprintln!("error: {:?}", e);
     }
