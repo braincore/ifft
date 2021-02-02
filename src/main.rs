@@ -816,38 +816,6 @@ mod tests {
             "Environment variable $DOESNOTEXIST not set."
         );
 
-        // Test bad root.not glob
-        let config_raw = ConfigRaw {
-            root: Some(String::from("~")),
-            not: Some(vec![String::from("***")]),
-            ifft: vec![],
-        };
-        let res = config_raw_to_config(config_raw, "/home".to_string());
-        assert_eq!(
-            res.unwrap_err(),
-            "root.not: error parsing glob '***': invalid use of **; must be one path component"
-        );
-
-        // Test bad ifft.if glob
-        let config_raw = ConfigRaw {
-            root: Some(String::from("~")),
-            not: None,
-            ifft: vec![IfftRaw {
-                name: None,
-                working_dir: None,
-                if_cond: Some(String::from("***")),
-                not: None,
-                then: String::from("ls"),
-                after: None,
-                emit: None,
-            }],
-        };
-        let res = config_raw_to_config(config_raw, "/home".to_string());
-        assert_eq!(
-            res.unwrap_err(),
-            "ifft.if: error parsing glob '***': invalid use of **; must be one path component"
-        );
-
         // Test bad ifft.if listen
         let config_raw = ConfigRaw {
             root: Some(String::from("~")),
@@ -886,26 +854,6 @@ mod tests {
         assert_eq!(
             res.unwrap_err(),
             "ifft.if: Bad on_start_listen format: \"on_start_listen:PATH:TRIGGER\""
-        );
-
-        // Test bad ifft.not glob
-        let config_raw = ConfigRaw {
-            root: Some(String::from("~")),
-            not: None,
-            ifft: vec![IfftRaw {
-                name: None,
-                working_dir: None,
-                if_cond: None,
-                not: Some(vec![String::from("***")]),
-                then: String::from("ls"),
-                after: None,
-                emit: None,
-            }],
-        };
-        let res = config_raw_to_config(config_raw, "/home".to_string());
-        assert_eq!(
-            res.unwrap_err(),
-            "ifft.not: error parsing glob '***': invalid use of **; must be one path component"
         );
 
         // Test root uses config_path if omitted.
