@@ -1,19 +1,10 @@
-extern crate chrono;
 use chrono::Utc;
-#[macro_use]
-extern crate clap;
-use clap::{App, Arg};
-extern crate globset;
+use clap::{value_t, App, Arg};
 use globset::Glob;
-extern crate ignore;
-extern crate notify;
 use notify::immediate_watcher;
 use notify::{RecursiveMode, Watcher};
-extern crate notify_rust;
 use notify_rust::Notification;
-#[macro_use]
-extern crate serde_derive;
-extern crate shellexpand;
+use serde_derive::Deserialize;
 use std::env;
 use std::fs;
 use std::io;
@@ -22,7 +13,6 @@ use std::process::{exit, Command, Output};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
-extern crate toml;
 
 fn watch(
     watch_path: PathBuf,
@@ -122,11 +112,7 @@ fn watch(
                 }
             }
         } else {
-            // TODO: Print reason for error.
-            assert!(
-                false,
-                "`on_start_listen` could not be satisfied (cycle or bad ref)."
-            );
+            eprintln!("`on_start_listen` could not be satisfied (cycle or bad ref)",)
         }
     }
     if quit_after_on_start {
@@ -193,7 +179,7 @@ fn watch(
                                         .send(Some((
                                             timer.elapsed(),
                                             ifft.clone(),
-                                            Some(path.clone()),
+                                            Some(path.to_path_buf()),
                                         )))
                                         .unwrap();
                                 }
@@ -224,7 +210,7 @@ fn linearize_iffts(mut all_iffts: Vec<&Ifft>) -> Result<Vec<Ifft>, ()> {
     let mut linearized_iffts: Vec<Ifft> = vec![];
     let mut prev_len = all_iffts.len();
     loop {
-        if all_iffts.len() == 0 {
+        if all_iffts.is_empty() {
             break;
         }
         for i in 0..all_iffts.len() {
@@ -431,7 +417,7 @@ impl Config {
                 return FilterResult::Pass { ifft: &ifft };
             }
         }
-        return FilterResult::Reject { global_not: None };
+        FilterResult::Reject { global_not: None }
     }
 }
 
@@ -464,7 +450,7 @@ impl Ifft {
                 return false;
             }
         }
-        return true;
+        true
     }
 
     fn then_needs_path_sub(&self) -> bool {
@@ -516,8 +502,8 @@ fn config_raw_to_config(
     }) = root_shell_expanded
     {
         return Err(match cause {
-            &env::VarError::NotPresent => format!("Environment variable ${} not set.", var_name),
-            &env::VarError::NotUnicode(_) => {
+            env::VarError::NotPresent => format!("Environment variable ${} not set.", var_name),
+            env::VarError::NotUnicode(_) => {
                 format!("Environment variable ${} is not valid unicode.", var_name)
             }
         });
@@ -542,9 +528,8 @@ fn config_raw_to_config(
         }
     }
 
-    let mut ifft_counter = 0;
     let mut iffts = vec![];
-    for ifft_raw in &config_raw.ifft {
+    for (ifft_counter, ifft_raw) in config_raw.ifft.iter().enumerate() {
         let mut nots = vec![];
         if let Some(ref not) = ifft_raw.not {
             for entry in not {
@@ -577,7 +562,7 @@ fn config_raw_to_config(
             root.clone()
         };
         iffts.push(Ifft {
-            id: ifft_counter,
+            id: ifft_counter as u32,
             config_parent_path: root.clone(),
             name: ifft_raw.name.clone(),
             working_dir,
@@ -586,7 +571,6 @@ fn config_raw_to_config(
             then: ifft_raw.then.clone(),
             emit: ifft_raw.emit.clone(),
         });
-        ifft_counter += 1;
     }
 
     Ok(Config {
@@ -597,16 +581,10 @@ fn config_raw_to_config(
 }
 
 fn parse_listen_string(root: &PathBuf, listen: String) -> Result<ListenTarget, ()> {
-    let listen_with_prefix = String::from(listen);
-    let listen_str;
-    if listen_with_prefix.starts_with("listen:") {
-        listen_str = &listen_with_prefix[7..];
-    } else if listen_with_prefix.starts_with("on_start_listen:") {
-        listen_str = &listen_with_prefix[16..];
-    } else {
-        return Err(());
-    }
-    let mut listen_iter = listen_str.rsplitn(2, ":");
+    let listen_str = listen
+        .trim_start_matches("listen:")
+        .trim_start_matches("on_start_listen:");
+    let mut listen_iter = listen_str.rsplitn(2, ':');
     let listen_trigger = listen_iter.next();
     if listen_trigger.is_none() {
         return Err(());
@@ -681,7 +659,7 @@ fn read_and_parse_config(config_path: PathBuf) -> Config {
         .to_str()
         .unwrap()
         .to_string();
-    let config = config_raw_to_config(config_raw, config_parent_path.clone());
+    let config = config_raw_to_config(config_raw, config_parent_path);
     match config {
         Ok(config) => config,
         Err(e) => {
@@ -789,7 +767,7 @@ fn main() {
     if let Err(e) = watch(
         canonical_watch_path,
         configs,
-        on_start_name.ok().or(run_before_name.ok()),
+        on_start_name.ok().or_else(|| run_before_name.ok()),
         quit_after_on_start,
         show_desktop_notifications,
         verbose,
