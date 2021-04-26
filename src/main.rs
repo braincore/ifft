@@ -107,7 +107,7 @@ fn watch(
                         ifft.config_parent_path
                     );
                     then_tx
-                        .send(Some((timer.elapsed(), ifft.clone(), None)))
+                        .send(Event::IfftTrigger(timer.elapsed(), ifft.clone(), None))
                         .unwrap();
                 }
             }
@@ -116,7 +116,17 @@ fn watch(
         }
     }
     if quit_after_on_start {
-        then_tx.send(None).expect("Failed to send quit signal.");
+        then_tx
+            .send(Event::Exit)
+            .expect("Failed to send quit signal.");
+    }
+
+    for config in &configs {
+        for delegate in &config.delegates {
+            then_tx
+                .send(Event::DelegateSpawn(delegate.clone()))
+                .expect("Failed to send delegate spawn event.");
+        }
     }
 
     loop {
@@ -176,11 +186,11 @@ fn watch(
                                     }
 
                                     then_tx
-                                        .send(Some((
+                                        .send(Event::IfftTrigger(
                                             timer.elapsed(),
                                             ifft.clone(),
                                             Some(path.to_path_buf()),
-                                        )))
+                                        ))
                                         .unwrap();
                                 }
                                 FilterResult::Reject { global_not } => {
@@ -249,11 +259,17 @@ fn linearize_iffts(mut all_iffts: Vec<&Ifft>) -> Result<Vec<Ifft>, ()> {
     Ok(linearized_iffts)
 }
 
+enum Event {
+    IfftTrigger(Duration, Ifft, Option<PathBuf>),
+    DelegateSpawn(Delegate),
+    Exit,
+}
+
 fn process_events(
     num_iffts: usize,
     timer: Instant,
-    rx: Receiver<Option<(Duration, Ifft, Option<PathBuf>)>>,
-    tx: Sender<Option<(Duration, Ifft, Option<PathBuf>)>>,
+    rx: Receiver<Event>,
+    tx: Sender<Event>,
     configs: Vec<Config>,
     show_desktop_notifications: bool,
 ) {
@@ -261,108 +277,124 @@ fn process_events(
     loop {
         match rx.recv() {
             Ok(msg) => {
-                if msg.is_none() {
-                    println!("Exiting...");
-                    exit(0);
-                }
-                let (ts, ifft, path) = msg.unwrap();
-                let date = Utc::now();
-                println!(
-                    "[{}] Execute: {:?} from {:?}",
-                    date.format("%Y-%m-%d %H:%M:%SZ"),
-                    ifft.then,
-                    ifft.working_dir,
-                );
-                let last_triggered_index = ifft.id as usize;
-                if let Some(last_triggered) = last_triggered[last_triggered_index] {
-                    if last_triggered > ts {
+                match msg {
+                    Event::IfftTrigger(ts, ifft, path) => {
+                        let date = Utc::now();
                         println!(
-                            "  Skip: Already executed ifft after event: {:?} > {:?}",
-                            last_triggered, ts
+                            "[{}] Execute: {:?} from {:?}",
+                            date.format("%Y-%m-%d %H:%M:%SZ"),
+                            ifft.then,
+                            ifft.working_dir,
                         );
-                        continue;
-                    }
-                }
-                if !ifft.then_needs_path_sub() {
-                    // Sleep a small fraction of time in anticipation that more events
-                    // with the same trigger are coming in. Effectively another
-                    // debounce layer. Beware: This sets an upper bound on execution
-                    // throughput of 50 execs/sec.
-                    thread::sleep(Duration::from_millis(20));
-                    // Marking trigger time before we run the command is necessarily
-                    // conservative.
-                    last_triggered[last_triggered_index] = Some(timer.elapsed());
-                }
-                let start_time = timer.elapsed();
-                let output_res = ifft.then_exec(&path);
-                if let Err(e) = output_res {
-                    eprintln!("  >Skipping due to error: {}", e);
-                    continue;
-                }
-                let exec_time = timer.elapsed() - start_time;
-                let output = output_res.unwrap();
-                let mut success = false;
-                let exit_msg = if let Some(exit_code) = output.status.code() {
-                    println!("  Exit code: {}", exit_code);
-                    if exit_code == 0 {
-                        success = true;
-                        String::from("completed")
-                    } else {
-                        format!("errored (code={})", exit_code)
-                    }
-                } else {
-                    String::from("unknown")
-                };
-                if let Ok(stdout) = String::from_utf8(output.stdout) {
-                    println!("  Stdout:");
-                    for line in stdout.lines() {
-                        println!("    {}", line)
-                    }
-                }
-                if let Ok(stderr) = String::from_utf8(output.stderr) {
-                    println!("  Stderr:");
-                    for line in stderr.lines() {
-                        println!("    {}", line)
-                    }
-                }
-                if show_desktop_notifications {
-                    let res = Notification::new()
-                        .summary(
-                            format!(
-                                "ifft: {} {}",
-                                exit_msg,
-                                path_to_string(&ifft.config_parent_path)
-                            )
-                            .as_str(),
-                        )
-                        .body(
-                            format!("{}s: {}", approx_duration_as_string(exec_time), ifft.then)
-                                .as_str(),
-                        )
-                        .timeout(2000)
-                        .show();
-                    if let Err(e) = res {
-                        eprintln!("Error showing desktop notification: {:?}", e);
-                    }
-                }
-                if success {
-                    if let Some(emit_id) = ifft.emit_id() {
-                        for config in &configs {
-                            for maybe_triggered_ifft in &config.iffts {
-                                if let IfCond::Listen(target) = &maybe_triggered_ifft.if_cond {
-                                    if target == &emit_id {
-                                        // FIXME: An ifft with a listen_cond cannot use {{}} in the `then` clause.
-                                        // Catch and report violations of this.
-                                        tx.send(Some((
-                                            timer.elapsed(),
-                                            maybe_triggered_ifft.clone(),
-                                            None,
-                                        )))
-                                        .expect("Failed to enqueue ifft task triggered by emit.");
+                        let last_triggered_index = ifft.id as usize;
+                        if let Some(last_triggered) = last_triggered[last_triggered_index] {
+                            if last_triggered > ts {
+                                println!(
+                                    "  Skip: Already executed ifft after event: {:?} > {:?}",
+                                    last_triggered, ts
+                                );
+                                continue;
+                            }
+                        }
+                        if !ifft.then_needs_path_sub() {
+                            // Sleep a small fraction of time in anticipation that more events
+                            // with the same trigger are coming in. Effectively another
+                            // debounce layer. Beware: This sets an upper bound on execution
+                            // throughput of 50 execs/sec.
+                            thread::sleep(Duration::from_millis(20));
+                            // Marking trigger time before we run the command is necessarily
+                            // conservative.
+                            last_triggered[last_triggered_index] = Some(timer.elapsed());
+                        }
+                        let start_time = timer.elapsed();
+                        let output_res = ifft.then_exec(&path);
+                        if let Err(e) = output_res {
+                            eprintln!("  >Skipping due to error: {}", e);
+                            continue;
+                        }
+                        let exec_time = timer.elapsed() - start_time;
+                        let output = output_res.unwrap();
+                        let mut success = false;
+                        let exit_msg = if let Some(exit_code) = output.status.code() {
+                            println!("  Exit code: {}", exit_code);
+                            if exit_code == 0 {
+                                success = true;
+                                String::from("completed")
+                            } else {
+                                format!("errored (code={})", exit_code)
+                            }
+                        } else {
+                            String::from("unknown")
+                        };
+                        if let Ok(stdout) = String::from_utf8(output.stdout) {
+                            println!("  Stdout:");
+                            for line in stdout.lines() {
+                                println!("    {}", line)
+                            }
+                        }
+                        if let Ok(stderr) = String::from_utf8(output.stderr) {
+                            println!("  Stderr:");
+                            for line in stderr.lines() {
+                                println!("    {}", line)
+                            }
+                        }
+                        if show_desktop_notifications {
+                            let res = Notification::new()
+                                .summary(
+                                    format!(
+                                        "ifft: {} {}",
+                                        exit_msg,
+                                        path_to_string(&ifft.config_parent_path)
+                                    )
+                                    .as_str(),
+                                )
+                                .body(
+                                    format!(
+                                        "{}s: {}",
+                                        approx_duration_as_string(exec_time),
+                                        ifft.then
+                                    )
+                                    .as_str(),
+                                )
+                                .timeout(2000)
+                                .show();
+                            if let Err(e) = res {
+                                eprintln!("Error showing desktop notification: {:?}", e);
+                            }
+                        }
+                        if success {
+                            if let Some(emit_id) = ifft.emit_id() {
+                                for config in &configs {
+                                    for maybe_triggered_ifft in &config.iffts {
+                                        if let IfCond::Listen(target) =
+                                            &maybe_triggered_ifft.if_cond
+                                        {
+                                            if target == &emit_id {
+                                                // FIXME: An ifft with a listen_cond cannot use {{}} in the `then` clause.
+                                                // Catch and report violations of this.
+                                                tx.send(Event::IfftTrigger(
+                                                    timer.elapsed(),
+                                                    maybe_triggered_ifft.clone(),
+                                                    None,
+                                                ))
+                                                    .expect("Failed to enqueue ifft task triggered by emit.");
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+                    Event::DelegateSpawn(delegate) => {
+                        thread::spawn(move || loop {
+                            println!("Starting delegate: {:?}", delegate.cmd);
+                            delegate.cmd_exec();
+                            println!("Delegate exited: {:?}", delegate.cmd);
+                        });
+                    }
+                    Event::Exit => {
+                        println!("Exiting...");
+                        exit(0);
                     }
                 }
             }
@@ -379,7 +411,8 @@ fn approx_duration_as_string(duration: Duration) -> String {
 struct ConfigRaw {
     root: Option<String>,
     not: Option<Vec<String>>,
-    ifft: Vec<IfftRaw>,
+    ifft: Option<Vec<IfftRaw>>,
+    delegate: Option<Vec<DelegateRaw>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -395,11 +428,34 @@ struct IfftRaw {
     emit: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DelegateRaw {
+    cmd: String,
+    working_dir: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct Delegate {
+    cmd: String,
+    working_dir: PathBuf,
+}
+
+impl Delegate {
+    fn cmd_exec(&self) {
+        let mut sh_cmd = Command::new("sh");
+        sh_cmd.arg("-c").arg(&self.cmd);
+        sh_cmd.current_dir(&self.working_dir);
+        let mut child = sh_cmd.spawn().expect("Failed to spawn delegate");
+        child.wait().expect("Wait for delegate failed");
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Config {
     root: PathBuf,
     nots: Vec<Glob>,
     iffts: Vec<Ifft>,
+    delegates: Vec<Delegate>,
 }
 
 impl Config {
@@ -529,7 +585,7 @@ fn config_raw_to_config(
     }
 
     let mut iffts = vec![];
-    for (ifft_counter, ifft_raw) in config_raw.ifft.iter().enumerate() {
+    for (ifft_counter, ifft_raw) in config_raw.ifft.unwrap_or_default().iter().enumerate() {
         let mut nots = vec![];
         if let Some(ref not) = ifft_raw.not {
             for entry in not {
@@ -573,10 +629,29 @@ fn config_raw_to_config(
         });
     }
 
+    let mut delegates = vec![];
+    for delegate_raw in config_raw.delegate.unwrap_or_default().iter() {
+        let working_dir = if let Some(ref working_dir_raw) = delegate_raw.working_dir {
+            let test_path = PathBuf::from(working_dir_raw);
+            if test_path.is_relative() {
+                root.join(test_path)
+            } else {
+                test_path
+            }
+        } else {
+            root.clone()
+        };
+        delegates.push(Delegate {
+            cmd: delegate_raw.cmd.clone(),
+            working_dir,
+        });
+    }
+
     Ok(Config {
         root,
         nots: root_nots,
         iffts,
+        delegates,
     })
 }
 
@@ -790,7 +865,8 @@ mod tests {
         let config_raw = ConfigRaw {
             root: Some(String::from("/does-not-exist")),
             not: None,
-            ifft: vec![],
+            ifft: Some(vec![]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(res.unwrap_err(), "Root path is invalid: /does-not-exist");
@@ -799,7 +875,8 @@ mod tests {
         let config_raw = ConfigRaw {
             root: Some(String::from("does-not-exist")),
             not: None,
-            ifft: vec![],
+            ifft: Some(vec![]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(res.unwrap_err(), "Root path is invalid: does-not-exist");
@@ -808,7 +885,8 @@ mod tests {
         let config_raw = ConfigRaw {
             root: Some(String::from("/$DOESNOTEXIST/does-not-exist")),
             not: None,
-            ifft: vec![],
+            ifft: Some(vec![]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
@@ -820,7 +898,7 @@ mod tests {
         let config_raw = ConfigRaw {
             root: Some(String::from("~")),
             not: None,
-            ifft: vec![IfftRaw {
+            ifft: Some(vec![IfftRaw {
                 name: None,
                 working_dir: None,
                 if_cond: Some(String::from("listen:../another-proj")),
@@ -828,7 +906,8 @@ mod tests {
                 then: String::from("ls"),
                 after: None,
                 emit: None,
-            }],
+            }]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
@@ -840,7 +919,7 @@ mod tests {
         let config_raw = ConfigRaw {
             root: Some(String::from("~")),
             not: None,
-            ifft: vec![IfftRaw {
+            ifft: Some(vec![IfftRaw {
                 name: None,
                 working_dir: None,
                 if_cond: Some(String::from("on_start_listen:../another-proj")),
@@ -848,7 +927,8 @@ mod tests {
                 then: String::from("ls"),
                 after: None,
                 emit: None,
-            }],
+            }]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(
@@ -860,7 +940,7 @@ mod tests {
         let config_raw = ConfigRaw {
             root: None,
             not: None,
-            ifft: vec![IfftRaw {
+            ifft: Some(vec![IfftRaw {
                 name: None,
                 working_dir: None,
                 if_cond: None,
@@ -868,7 +948,8 @@ mod tests {
                 then: String::from("ls"),
                 after: None,
                 emit: None,
-            }],
+            }]),
+            delegate: Some(vec![]),
         };
         let res = config_raw_to_config(config_raw, "/home".to_string());
         assert_eq!(res.unwrap().root, PathBuf::from("/home"),);
@@ -1027,6 +1108,7 @@ mod tests {
             root: PathBuf::from("/a/b"),
             nots: vec![Glob::new("*.swp").unwrap()],
             iffts: vec![ifft],
+            delegates: vec![],
         };
 
         // Test pass

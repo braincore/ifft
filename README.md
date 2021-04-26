@@ -220,6 +220,23 @@ emit = "built"
 Using the on start syntax (`ifft my-app -r build -q`) will execute these iffts
 in the correct order: first `my-c-service`; second `my-rust-service`.
 
+### Delegation
+
+IFFT can also launch other watch/recompilation programs. For example, it's
+common to have a file watcher setup with `npm`/`yarn` (e.g. `yarn watch`). To
+delegate watching, use a `[[delegate]]` section:
+
+```toml
+[[delegate]]
+cmd = "yarn watch"
+```
+
+Delegates are launched after "On Start" triggers. This ordering is intentional
+so that "On Start" can perform setup needed by delegates (e.g. `yarn install`).
+
+Delegates are a nice tool if you want to make IFFT the primary file watching
+tool across a large multi-project repository.
+
 ## Features
 
 * Configure with a `toml` file.
