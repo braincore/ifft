@@ -1,5 +1,5 @@
 use chrono::Utc;
-use clap::{value_t, App, Arg};
+use clap::{crate_version, value_t, App, Arg};
 use globset::Glob;
 use notify::immediate_watcher;
 use notify::{RecursiveMode, Watcher};
@@ -751,6 +751,7 @@ fn path_to_string(path: &Path) -> String {
 fn main() {
     let matches = App::new("IFFT")
         .about("IF Filesystem-event Then")
+        .version(crate_version!())
         .arg(
             Arg::with_name("WATCH-PATH")
                 .default_value(".")
