@@ -775,11 +775,11 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("QUIT-AFTER-RUN-BEFORE")
+            Arg::with_name("QUIT-AFTER-ON-START")
                 .required(false)
                 .short("q")
                 .long("quit")
-                .help("Quit after iffts matching run-before have been executed."),
+                .help("Quit after iffts matching on-start have been executed."),
         )
         .arg(
             Arg::with_name("NOTIFICATIONS")
@@ -805,7 +805,7 @@ fn main() {
     let watch_path = value_t!(matches, "WATCH-PATH", String).unwrap_or_else(|e| e.exit());
     let on_start_name = value_t!(matches, "ON-START", String);
     let run_before_name = value_t!(matches, "RUN-BEFORE", String);
-    let quit_after_on_start = matches.is_present("QUIT-AFTER-RUN-BEFORE");
+    let quit_after_on_start = matches.is_present("QUIT-AFTER-ON-START");
     let show_desktop_notifications = matches.is_present("NOTIFICATIONS");
     let no_ignore = matches.is_present("NO-IGNORE");
     let verbose = matches.is_present("VERBOSE");
