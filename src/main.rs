@@ -73,6 +73,7 @@ fn watch(
     let configs_clone = configs.clone();
     thread::spawn(move || {
         process_events(
+            verbose,
             num_iffts,
             timer,
             then_rx,
@@ -133,7 +134,9 @@ fn watch(
         match event_rx.recv() {
             Ok(event) => {
                 let date = Utc::now();
-                println!("[{}] Event: {:?}", date.format("%Y-%m-%d %H:%M:%SZ"), event);
+                if verbose {
+                    println!("[{}] Event: {:?}", date.format("%Y-%m-%d %H:%M:%SZ"), event);
+                }
                 for path in event.paths {
                     assert!(path.is_absolute());
                     let mut paths = vec![path.clone()];
@@ -177,14 +180,16 @@ fn watch(
                             assert!(relpath.is_relative());
                             match config.filter(relpath) {
                                 FilterResult::Pass { ifft } => {
-                                    println!("  Match from config in: {:?}", config.root);
-                                    if let Some(ref name) = ifft.name {
-                                        println!("  Matched ifft: {}", name);
+                                    if verbose {
+                                        print!("  Match: config={:?}", config.root);
+                                        if let Some(ref name) = ifft.name {
+                                            print!(" ifft: {}", name);
+                                        }
+                                        if let IfCond::Glob(ref if_cond_glob) = ifft.if_cond {
+                                            print!(" if-cond: {:?}", if_cond_glob.glob());
+                                        }
+                                        println!();
                                     }
-                                    if let IfCond::Glob(ref if_cond_glob) = ifft.if_cond {
-                                        println!("  Matched if-cond: {:?}", if_cond_glob.glob());
-                                    }
-
                                     then_tx
                                         .send(Event::IfftTrigger(
                                             timer.elapsed(),
@@ -266,6 +271,7 @@ enum Event {
 }
 
 fn process_events(
+    verbose: bool,
     num_iffts: usize,
     timer: Instant,
     rx: Receiver<Event>,
@@ -279,23 +285,24 @@ fn process_events(
             Ok(msg) => {
                 match msg {
                     Event::IfftTrigger(ts, ifft, path) => {
-                        let date = Utc::now();
-                        println!(
-                            "[{}] Execute: {:?} from {:?}",
-                            date.format("%Y-%m-%d %H:%M:%SZ"),
-                            ifft.then,
-                            ifft.working_dir,
-                        );
                         let last_triggered_index = ifft.id as usize;
                         if let Some(last_triggered) = last_triggered[last_triggered_index] {
                             if last_triggered > ts {
-                                println!(
-                                    "  Skip: Already executed ifft after event: {:?} > {:?}",
-                                    last_triggered, ts
-                                );
+                                if verbose {
+                                    println!(
+                                        "  Skip: Already executed ifft after event: {:?} > {:?}",
+                                        last_triggered, ts
+                                    );
+                                }
                                 continue;
                             }
                         }
+                        println!(
+                            "[{}] Execute: {:?} from {:?}",
+                            Utc::now().format("%Y-%m-%d %H:%M:%SZ"),
+                            ifft.then,
+                            ifft.working_dir,
+                        );
                         if !ifft.then_needs_path_sub() {
                             // Sleep a small fraction of time in anticipation that more events
                             // with the same trigger are coming in. Effectively another
@@ -316,7 +323,9 @@ fn process_events(
                         let output = output_res.unwrap();
                         let mut success = false;
                         let exit_msg = if let Some(exit_code) = output.status.code() {
-                            println!("  Exit code: {}", exit_code);
+                            if verbose || exit_code != 0 {
+                                println!("  Exit code: {}", exit_code);
+                            }
                             if exit_code == 0 {
                                 success = true;
                                 String::from("completed")
@@ -326,18 +335,22 @@ fn process_events(
                         } else {
                             String::from("unknown")
                         };
-                        if let Ok(stdout) = String::from_utf8(output.stdout) {
-                            println!("  Stdout:");
-                            for line in stdout.lines() {
-                                println!("    {}", line)
+                        println!("  Done in {}s", approx_duration_as_string(exec_time),);
+                        if verbose || !success {
+                            if let Ok(stdout) = String::from_utf8(output.stdout) {
+                                println!("  Stdout:");
+                                for line in stdout.lines() {
+                                    println!("    {}", line)
+                                }
+                            }
+                            if let Ok(stderr) = String::from_utf8(output.stderr) {
+                                println!("  Stderr:");
+                                for line in stderr.lines() {
+                                    println!("    {}", line)
+                                }
                             }
                         }
-                        if let Ok(stderr) = String::from_utf8(output.stderr) {
-                            println!("  Stderr:");
-                            for line in stderr.lines() {
-                                println!("    {}", line)
-                            }
-                        }
+
                         if show_desktop_notifications {
                             let res = Notification::new()
                                 .summary(
@@ -799,7 +812,7 @@ fn main() {
             Arg::with_name("VERBOSE")
                 .required(false)
                 .short("v")
-                .long("--verbose"),
+                .long("verbose"),
         )
         .get_matches();
     let mut configs = vec![];
