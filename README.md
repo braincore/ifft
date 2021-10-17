@@ -29,8 +29,8 @@ downloads.
 * Config files can be distributed throughout a filesystem tree.
 * Use glob patterns for `if` and `not` conditions.
 * Global `not` filtering and per-trigger `not` filtering.
-* If multiple events trigger the same `if`, `then` is only executed if an event
-  was triggered after the last time `then` was executed.
+* Debouncing: If multiple events trigger the same `if`, `then` is only executed
+  if an event was triggered after the last time `then` was executed.
 * On start, iffts with a matching name can be triggered without any file event.
 * Events on paths with symlink components will also have their absolute-path
   equivalent tested against triggers.
