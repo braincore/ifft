@@ -1,6 +1,8 @@
 use chrono::Utc;
 use clap::{crate_version, value_t, App, Arg};
 use globset::Glob;
+use nix::sys::signal;
+use nix::unistd;
 use notify::immediate_watcher;
 use notify::{RecursiveMode, Watcher};
 use notify_rust::Notification;
@@ -9,8 +11,8 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command, Output};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::process::{exit, Child, Command, Output};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -68,6 +70,10 @@ fn watch(
     for config in &configs {
         num_iffts += config.iffts.len();
     }
+    let mut num_delegates = 0;
+    for config in &configs {
+        num_delegates += config.delegates.len();
+    }
 
     let then_tx_clone = then_tx.clone();
     let configs_clone = configs.clone();
@@ -75,6 +81,7 @@ fn watch(
         process_events(
             verbose,
             num_iffts,
+            num_delegates,
             timer,
             then_rx,
             then_tx_clone,
@@ -267,18 +274,21 @@ fn linearize_iffts(mut all_iffts: Vec<&Ifft>) -> Result<Vec<Ifft>, ()> {
 enum Event {
     IfftTrigger(Duration, Ifft, Option<PathBuf>),
     DelegateSpawn(Delegate),
+    DelegateRestart(Delegate),
     Exit,
 }
 
 fn process_events(
     verbose: bool,
     num_iffts: usize,
+    num_delegates: usize,
     timer: Instant,
     rx: Receiver<Event>,
     tx: Sender<Event>,
     configs: Vec<Config>,
     show_desktop_notifications: bool,
 ) {
+    let mut delegate_txs = vec![None; num_delegates];
     let mut last_triggered = vec![None; num_iffts];
     loop {
         match rx.recv() {
@@ -378,6 +388,13 @@ fn process_events(
                         if success {
                             if let Some(emit_id) = ifft.emit_id() {
                                 for config in &configs {
+                                    for maybe_triggered_delegate in &config.delegates {
+                                        if let Some(target) = &maybe_triggered_delegate.restart_on {
+                                            if target == &emit_id {
+                                                tx.send(Event::DelegateRestart(maybe_triggered_delegate.clone())).expect("Failed to enqueue delegate restart triggered by emit.");
+                                            }
+                                        }
+                                    }
                                     for maybe_triggered_ifft in &config.iffts {
                                         if let IfCond::Listen(target) =
                                             &maybe_triggered_ifft.if_cond
@@ -399,11 +416,53 @@ fn process_events(
                         }
                     }
                     Event::DelegateSpawn(delegate) => {
+                        let (delegate_tx, delegate_rx) = channel();
+                        delegate_txs[delegate.id as usize] = Some(delegate_tx);
                         thread::spawn(move || loop {
                             println!("Starting delegate: {:?}", delegate.cmd);
-                            delegate.cmd_exec();
-                            println!("Delegate exited: {:?}", delegate.cmd);
+                            let mut child = delegate.cmd_exec();
+                            loop {
+                                match delegate_rx.try_recv() {
+                                    Ok(_) => {
+                                        println!("Restarting delegate: {:?}", delegate.cmd);
+                                        let pid = unistd::Pid::from_raw(child.id() as i32);
+                                        let pgid = unistd::getpgid(Some(pid))
+                                            .expect("Failed to get process group ID.");
+                                        signal::killpg(pgid, signal::Signal::SIGTERM)
+                                            .expect("Failed to send TERM to child.");
+                                    }
+                                    Err(e) => match e {
+                                        TryRecvError::Empty => {}
+                                        TryRecvError::Disconnected => {
+                                            eprintln!(
+                                                "error: other end of pipe disconnected {:?}",
+                                                delegate.cmd
+                                            );
+                                        }
+                                    },
+                                }
+                                match child.try_wait() {
+                                    Ok(Some(_)) => {
+                                        println!("Delegate exited: {:?}", delegate.cmd);
+                                        break;
+                                    }
+                                    Ok(None) => {
+                                        thread::sleep(Duration::from_secs(1));
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        child.wait().expect("Failed to wait for child process.");
+                                    }
+                                }
+                            }
                         });
+                    }
+                    Event::DelegateRestart(delegate) => {
+                        if let Some(delegate_tx) = &delegate_txs[delegate.id as usize] {
+                            delegate_tx
+                                .send(true)
+                                .expect("Failed to send delegate restart msg.");
+                        }
                     }
                     Event::Exit => {
                         println!("Exiting...");
@@ -445,21 +504,24 @@ struct IfftRaw {
 struct DelegateRaw {
     cmd: String,
     working_dir: Option<String>,
+    restart_on: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 struct Delegate {
+    id: u32,
     cmd: String,
     working_dir: PathBuf,
+    restart_on: Option<ListenTarget>,
 }
 
 impl Delegate {
-    fn cmd_exec(&self) {
-        let mut sh_cmd = Command::new("sh");
-        sh_cmd.arg("-c").arg(&self.cmd);
+    fn cmd_exec(&self) -> Child {
+        // Run process in its own process group for easy killing as a group.
+        let mut sh_cmd = Command::new("setsid");
+        sh_cmd.arg("sh").arg("-c").arg(&self.cmd);
         sh_cmd.current_dir(&self.working_dir);
-        let mut child = sh_cmd.spawn().expect("Failed to spawn delegate");
-        child.wait().expect("Wait for delegate failed");
+        sh_cmd.spawn().expect("Failed to spawn delegate")
     }
 }
 
@@ -643,7 +705,9 @@ fn config_raw_to_config(
     }
 
     let mut delegates = vec![];
-    for delegate_raw in config_raw.delegate.unwrap_or_default().iter() {
+    for (delegate_counter, delegate_raw) in
+        config_raw.delegate.unwrap_or_default().iter().enumerate()
+    {
         let working_dir = if let Some(ref working_dir_raw) = delegate_raw.working_dir {
             let test_path = PathBuf::from(working_dir_raw);
             if test_path.is_relative() {
@@ -654,9 +718,21 @@ fn config_raw_to_config(
         } else {
             root.clone()
         };
+        let restart_on = if let Some(ref restart_on_raw) = delegate_raw.restart_on {
+            match parse_restart_on(&root, restart_on_raw.clone()) {
+                Ok(res) => Some(res),
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         delegates.push(Delegate {
+            id: delegate_counter as u32,
             cmd: delegate_raw.cmd.clone(),
             working_dir,
+            restart_on,
         });
     }
 
@@ -721,6 +797,22 @@ fn parse_if_cond(root: &PathBuf, if_cond_raw: String) -> Result<IfCond, String> 
             return Err(format!("ifft.if: {}", e));
         }
         Ok(IfCond::Glob(try_glob.unwrap()))
+    }
+}
+
+fn parse_restart_on(root: &PathBuf, restart_on_raw: String) -> Result<ListenTarget, String> {
+    if restart_on_raw.starts_with("listen:") {
+        if let Ok(listen_target) = parse_listen_string(&root, restart_on_raw) {
+            Ok(listen_target)
+        } else {
+            Err(String::from(
+                "ifft.if: Bad listen format: \"listen:PATH:TRIGGER\"",
+            ))
+        }
+    } else {
+        Err(String::from(
+            "ifft.if: Bad listen format: \"listen:PATH:TRIGGER\"",
+        ))
     }
 }
 
@@ -830,6 +922,7 @@ fn main() {
 
     {
         let mut num_iffts = 0;
+        let mut num_delegates = 0;
         let walker = ignore::WalkBuilder::new(&canonical_watch_path)
             .standard_filters(!no_ignore)
             .build();
@@ -850,6 +943,10 @@ fn main() {
                 ifft.id += num_iffts;
             }
             num_iffts += config.iffts.len() as u32;
+            for delegate in &mut config.delegates {
+                delegate.id += num_delegates;
+            }
+            num_delegates += config.delegates.len() as u32;
             configs.push(config);
         }
     }

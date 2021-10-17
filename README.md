@@ -234,8 +234,11 @@ cmd = "yarn watch"
 Delegates are launched after "On Start" triggers. This ordering is intentional
 so that "On Start" can perform setup needed by delegates (e.g. `yarn install`).
 
-Delegates are a nice tool if you want to make IFFT the primary file watching
-tool across a large multi-project repository.
+An optional `restart_on` field can be set with a value in `listen:path:emit`
+format to trigger a restart of the delegate process.
+
+Delegates are useful for making IFFT the primary file watching tool across a
+large multi-project repository.
 
 ## Features
 
