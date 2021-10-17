@@ -23,6 +23,24 @@ cargo install ifft
 Otherwise, check [releases](https://github.com/braincore/ifft/releases) for
 downloads.
 
+## Features
+
+* Configure with a `toml` file.
+* Config files can be distributed throughout a filesystem tree.
+* Use glob patterns for `if` and `not` conditions.
+* Global `not` filtering and per-trigger `not` filtering.
+* If multiple events trigger the same `if`, `then` is only executed if an event
+  was triggered after the last time `then` was executed.
+* On start, iffts with a matching name can be triggered without any file event.
+* Events on paths with symlink components will also have their absolute-path
+  equivalent tested against triggers.
+* Dependencies
+  * An ifft can be triggered by listening for an emitted tag from another.
+  * On start, iffts can be ordered via a dependency graph.
+* Respects ignore files (hidden, `.gitignore`, ...) for config collection and
+  folder watching.
+* Delegate file watching & compilation to other processes (e.g. `yarn watch`).
+
 ## Usage
 
 ### Hello, world.
@@ -239,23 +257,6 @@ format to trigger a restart of the delegate process.
 
 Delegates are useful for making IFFT the primary file watching tool across a
 large multi-project repository.
-
-## Features
-
-* Configure with a `toml` file.
-* Config files can be distributed throughout a filesystem tree.
-* Use glob patterns for `if` and `not` conditions.
-* Global `not` filtering and per-trigger `not` filtering.
-* If multiple events trigger the same `if`, `then` is only executed if an event
-  was triggered after the last time `then` was executed.
-* On start, iffts with a matching name can be triggered without any file event.
-* Events on paths with symlink components will also have their absolute-path
-  equivalent tested against triggers.
-* Dependencies
-  * An ifft can be triggered by listening for an emitted tag from another.
-  * On start, iffts can be ordered via a dependency graph.
-* Respects ignore files (hidden, `.gitignore`, ...) for config collection and
-  folder watching.
 
 ## Platforms
 
