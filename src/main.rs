@@ -310,7 +310,7 @@ fn process_events(
                         println!(
                             "[{}] Execute: {:?} from {:?}",
                             Utc::now().format("%Y-%m-%d %H:%M:%SZ"),
-                            ifft.then,
+                            ifft.then.replace("{{}}",path.as_ref().unwrap().to_str().unwrap()),
                             ifft.working_dir,
                         );
                         if !ifft.then_needs_path_sub() {
