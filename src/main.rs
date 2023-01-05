@@ -310,7 +310,7 @@ fn process_events(
                         println!(
                             "[{}] Execute: {:?} from {:?}",
                             Utc::now().format("%Y-%m-%d %H:%M:%SZ"),
-                            ifft.then.replace("{{}}",path.as_ref().unwrap().to_str().unwrap()),
+                            ifft.render_then(&path),
                             ifft.working_dir,
                         );
                         if !ifft.then_needs_path_sub() {
@@ -589,15 +589,21 @@ impl Ifft {
         self.then.contains("{{}}")
     }
 
+    fn render_then(&self, path: &Option<PathBuf>) -> String {
+        match path {
+            Some(ref path) => {
+                self.then.replace("{{}}", path.to_str().expect("Non utf-8 path"))
+            }
+            None => {
+                assert!(!self.then_needs_path_sub());
+                self.then.clone()
+            }
+        }
+    }
+
     fn then_exec(&self, path: &Option<PathBuf>) -> io::Result<Output> {
         let mut cmd = Command::new("sh");
-        let then = if let Some(path) = path {
-            self.then
-                .replace("{{}}", path.to_str().expect("Non utf-8 path"))
-        } else {
-            assert!(!self.then_needs_path_sub());
-            self.then.clone()
-        };
+        let then = self.render_then(&path);
         cmd.arg("-c").arg(&then);
         cmd.current_dir(&self.working_dir);
         cmd.output()
